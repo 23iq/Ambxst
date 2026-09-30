@@ -1,7 +1,10 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
+import Quickshell.Widgets
 import qs.modules.theme
 import qs.modules.components
+import qs.config
 import qs.modules.services
 import "clipboard_utils.js" as ClipboardUtils
 

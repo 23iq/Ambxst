@@ -1046,38 +1046,14 @@ Item {
 
                     highlight: Item {
                         width: resultsList.width
-                        height: {
-                            let baseHeight = 48;
-                            if (resultsList.currentIndex === root.expandedItemIndex && !root.deleteMode && !root.aliasMode) {
-                                var itemData = itemsModel.get(resultsList.currentIndex).itemData;
-                                var optionsCount = 4;
-                                if (itemData.isFile || itemData.isImage || ClipboardUtils.isUrl(itemData.preview)) {
-                                    optionsCount++;
-                                }
-                                var listHeight = 36 * Math.min(3, optionsCount);
-                                return baseHeight + 4 + listHeight + 8;
-                            }
-                            return baseHeight;
-                        }
+                        // Anchor to the live delegate position/height instead
+                        // of index arithmetic: ListModel.get() bindings don't
+                        // re-evaluate reliably after itemsModel.move() (used
+                        // by the diff-sync on deletions), which used to leave
+                        // this highlight offset from the selected row.
+                        height: resultsList.currentItem ? resultsList.currentItem.height : 48
 
-                        // Calculate Y position based on index, not item position
-                        y: {
-                            var yPos = 0;
-                            for (var i = 0; i < resultsList.currentIndex && i < itemsModel.count; i++) {
-                                var itemHeight = 48;
-                                if (i === root.expandedItemIndex && !root.deleteMode && !root.aliasMode) {
-                                    var itemData = itemsModel.get(i).itemData;
-                                    var optionsCount = 4;
-                                    if (itemData.isFile || itemData.isImage || ClipboardUtils.isUrl(itemData.preview)) {
-                                        optionsCount++;
-                                    }
-                                    var listHeight = 36 * Math.min(3, optionsCount);
-                                    itemHeight = 48 + 4 + listHeight + 8;
-                                }
-                                yPos += itemHeight;
-                            }
-                            return yPos;
-                        }
+                        y: resultsList.currentItem ? resultsList.currentItem.y : 0
 
                         Behavior on y {
                             enabled: Config.animDuration > 0
