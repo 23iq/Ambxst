@@ -1090,9 +1090,13 @@ Rectangle {
         currentIndex: currentTab - 1
 
         // Tab 1: Clipboard
+        // Sticky load: clipboardEverLoaded replaces `item !== null` in the
+        // active binding (referencing item there is a binding loop).
+        property bool clipboardEverLoaded: false
         Loader {
             id: clipboardLoader
-            active: currentTab === 1 || item !== null || root.prewarmTabs
+            active: currentTab === 1 || root.clipboardEverLoaded || root.prewarmTabs
+            onLoaded: root.clipboardEverLoaded = true
             sourceComponent: Component {
                 ClipboardTab {
                     leftPanelWidth: root.leftPanelWidth

@@ -40,6 +40,7 @@ type Manager struct {
 	started bool
 
 	daemonCmd *exec.Cmd
+	daemonMu  sync.Mutex
 	subCmdMu  sync.Mutex
 	subCmd    *exec.Cmd
 
@@ -88,7 +89,8 @@ func (m *Manager) Start() error {
 		return err
 	}
 
-	m.wg.Add(1)
+	m.wg.Add(2)
+	go m.daemonLoop()
 	go m.subscribeLoop()
 
 	m.mu.Lock()
@@ -105,8 +107,66 @@ func (m *Manager) startDaemon() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("axctl daemon: %w", err)
 	}
+	m.daemonMu.Lock()
 	m.daemonCmd = cmd
+	m.daemonMu.Unlock()
 	return nil
+}
+
+// daemonLoop supervises the axctl daemon: if it exits prematurely (crash,
+// stray pkill, OOM) it is relaunched with backoff. Without this a dead
+// axctl daemon silently leaves the shell without window/workspace state —
+// the subscribe loop keeps retrying against a socket nothing serves.
+func (m *Manager) daemonLoop() {
+	defer m.wg.Done()
+	backoff := time.Second
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+
+		m.daemonMu.Lock()
+		cmd := m.daemonCmd
+		m.daemonMu.Unlock()
+		if cmd == nil {
+			if err := m.startDaemon(); err != nil {
+				fmt.Fprintf(os.Stderr, "[compositor] %v\n", err)
+				select {
+				case <-m.stopCh:
+					return
+				case <-time.After(backoff):
+				}
+				continue
+			}
+			m.daemonMu.Lock()
+			cmd = m.daemonCmd
+			m.daemonMu.Unlock()
+		}
+
+		waitCh := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(waitCh)
+		}()
+
+		select {
+		case <-m.stopCh:
+			return
+		case <-waitCh:
+		}
+
+		fmt.Fprintf(os.Stderr, "[compositor] axctl daemon exited; restarting in %v\n", backoff)
+		select {
+		case <-m.stopCh:
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 10*time.Second {
+			backoff *= 2
+		}
+	}
 }
 
 // axctlSocketPath reproduces the path axctl itself uses for its IPC socket
@@ -307,7 +367,11 @@ func (m *Manager) Close() {
 	m.subCmdMu.Unlock()
 
 	m.killGroup(sub)
-	m.killGroup(m.daemonCmd)
+
+	m.daemonMu.Lock()
+	daemon := m.daemonCmd
+	m.daemonMu.Unlock()
+	m.killGroup(daemon)
 
 	done := make(chan struct{})
 	go func() { m.wg.Wait(); close(done) }()
