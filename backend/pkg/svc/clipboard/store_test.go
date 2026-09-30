@@ -13,6 +13,9 @@ import (
 func testPaths(t *testing.T) *paths.Paths {
 	t.Helper()
 	base := t.TempDir()
+	// Isolate the runtime dir: ClipboardTmpDB and the image cache live in
+	// XDG_RUNTIME_DIR and must never touch the user's live session files.
+	t.Setenv("XDG_RUNTIME_DIR", base)
 	p := &paths.Paths{
 		ConfigDir: filepath.Join(base, "config"),
 		DataDir:   filepath.Join(base, "data"),
@@ -111,7 +114,7 @@ func TestMigrationAndRetention(t *testing.T) {
 	// Retention: cap unpinned history at maxUnpinnedItems.
 	for i := 0; i < 60; i++ {
 		content := []byte("item-" + strings.Repeat("x", i))
-		if ok, err := st.insertUnpinned("text/plain", content, false, int64(len(content))); err != nil || !ok {
+		if ok, err := st.insertUnpinned("text/plain", nil, content, false, int64(len(content))); err != nil || !ok {
 			t.Fatalf("insert %d: ok=%v err=%v", i, ok, err)
 		}
 	}
@@ -135,7 +138,7 @@ func TestTogglePinAndTmpMode(t *testing.T) {
 	}
 	defer st.close()
 
-	if ok, _ := st.insertUnpinned("text/plain", []byte("item1"), false, 5); !ok {
+	if ok, _ := st.insertUnpinned("text/plain", nil, []byte("item1"), false, 5); !ok {
 		t.Fatal("insert failed")
 	}
 	items := st.listItems()
@@ -152,10 +155,10 @@ func TestTogglePinAndTmpMode(t *testing.T) {
 		t.Fatalf("pin failed: %v", items)
 	}
 
-	// Copying the same content again recreates it as unpinned; unpinning
-	// must not collide with the UNIQUE(content_hash) of the unpinned store.
-	if ok, _ := st.insertUnpinned("text/plain", []byte("item1"), false, 5); !ok {
-		t.Fatal("re-insert failed")
+	// Copying the same content again must NOT duplicate it across stores
+	// (cross-store dedup keeps pinned items pinned).
+	if ok, _ := st.insertUnpinned("text/plain", nil, []byte("item1"), false, 5); ok {
+		t.Fatal("pinned content was duplicated into the unpinned store")
 	}
 	if err := st.togglePin(itemID{pinned: true, id: 1}); err != nil {
 		t.Fatal(err)
@@ -172,7 +175,7 @@ func TestTogglePinAndTmpMode(t *testing.T) {
 	}
 
 	// tmpfs mode moves unpinned history to the runtime dir.
-	if ok, _ := st.insertUnpinned("text/plain", []byte("item2"), false, 5); !ok {
+	if ok, _ := st.insertUnpinned("text/plain", nil, []byte("item2"), false, 5); !ok {
 		t.Fatal("insert failed")
 	}
 	if err := st.setTmpMode(true); err != nil {
@@ -196,5 +199,67 @@ func TestTogglePinAndTmpMode(t *testing.T) {
 	items = st.listItems()
 	if len(items) != 1 || items[0]["id"].(string)[0] != 'p' {
 		t.Fatalf("expected only pinned after deactivate, got %v", items)
+	}
+}
+
+// TestRowIDsAreNotReused: deleting the newest row must not hand its id to
+// the next insert — QML-side caches key off (id, hash) but stale ids would
+// otherwise alias previews across items.
+func TestRowIDsAreNotReused(t *testing.T) {
+	p := testPaths(t)
+	st, err := newStore(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.close()
+
+	if ok, _ := st.insertUnpinned("text/plain", nil, []byte("first"), false, 5); !ok {
+		t.Fatal("insert failed")
+	}
+	items := st.listItems()
+	firstID := items[0]["id"].(string)
+	id, _ := parseID(firstID)
+	if _, err := st.deleteItem(id); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := st.insertUnpinned("text/plain", nil, []byte("second"), false, 6); !ok {
+		t.Fatal("insert failed")
+	}
+	items = st.listItems()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0]["id"].(string) == firstID {
+		t.Fatalf("rowid %s was reused after delete", firstID)
+	}
+}
+
+// TestMimesRoundtrip: offered mime lists persist and come back in list.
+func TestMimesRoundtrip(t *testing.T) {
+	p := testPaths(t)
+	st, err := newStore(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.close()
+
+	mimes := []string{"text/plain;charset=utf-8", "text/plain", "text/html"}
+	if ok, _ := st.insertUnpinned("text/plain;charset=utf-8", mimes, []byte("hello"), false, 5); !ok {
+		t.Fatal("insert failed")
+	}
+	items := st.listItems()
+	got, ok := items[0]["mimes"].([]string)
+	if !ok || len(got) != 3 || got[0] != "text/plain;charset=utf-8" {
+		t.Fatalf("mimes roundtrip failed: %v", items[0]["mimes"])
+	}
+
+	// Re-insert (bump) refreshes the mime list.
+	if ok, _ := st.insertUnpinned("text/plain;charset=utf-8", []string{"text/plain"}, []byte("hello"), false, 5); !ok {
+		t.Fatal("bump failed")
+	}
+	items = st.listItems()
+	got, ok = items[0]["mimes"].([]string)
+	if !ok || len(got) != 1 {
+		t.Fatalf("mimes not refreshed on bump: %v", items[0]["mimes"])
 	}
 }

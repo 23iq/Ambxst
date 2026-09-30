@@ -24,7 +24,7 @@ vet:
 lint: vet
 
 ## run: build and launch the shell (the ambxst binary itself is the
-##       daemon; it supervises Quickshell, axctl and wl-paste children)
+##       daemon; it supervises Quickshell and axctl children)
 run: build
 	@./$(BINARY)
 

@@ -39,8 +39,9 @@ func (s *Service) Register(srv *ipc.Server) {
 
 // SendParams mirrors the shape Notifications.notifyInternal accepts on the
 // QML side, plus an optional `actions` field whose entries can carry a
-// `clipboard` value — when the user clicks the action, the QML side runs
-// `wl-copy` with that value. This is how cross-process colorpicker actions
+// `clipboard` value — when the user clicks the action, the QML side
+// copies it through the daemon's clipboard service. This is how
+// cross-process colorpicker actions
 // stay in sync without requiring the CLI to keep its notification alive.
 type SendParams struct {
 	Summary      string         `json:"summary"`

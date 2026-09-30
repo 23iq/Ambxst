@@ -157,6 +157,10 @@ func New() (*Daemon, error) {
 
 	ocrSvc := ocrsvc.NewService()
 	ocrSvc.Register(d.srv)
+	// Screenshot/OCR copies go through the clipboard service so the
+	// daemon stays the single selection owner (no wl-clipboard).
+	shotSvc.SetClipboardCopy(clipSvc.CopyFile)
+	ocrSvc.SetClipboardCopy(clipSvc.CopyText)
 
 	// notify — exposes notify.send so CLIs (colorpicker, screen, …) can
 	// route their notifications through the running shell instead of
@@ -210,7 +214,7 @@ func (d *Daemon) TriggerShutdown() {
 //  1. close the IPC listener (refuse new connections)
 //  2. SIGTERM → Quickshell; SIGKILL its process group if it ignores
 //  3. compositor.Close()  → axctl daemon + axctl subscribe
-//  4. clipboard.Close()   → wl-paste --watch
+//  4. clipboard.Close()   → data-control client
 //  5. sleep.Close()       → dbus connection
 func (d *Daemon) Run(qsBin, shellQML string) error {
 	if err := d.srv.Listen(); err != nil {
@@ -223,6 +227,12 @@ func (d *Daemon) Run(qsBin, shellQML string) error {
 
 	if err := d.compositor.Manager().Start(); err != nil {
 		log.Printf("[ambxst] compositor manager: %v (continuing)", err)
+	}
+
+	// Open the encrypted clipboard stores off the boot path so the first
+	// clipboard.list IPC never pays the adiantum + FTS5 init cost.
+	if d.clipboard != nil {
+		go d.clipboard.Prewarm()
 	}
 
 	// Caffeine + Nightlight restore both depend on side effects that may

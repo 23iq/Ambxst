@@ -153,6 +153,22 @@ Item {
         sourceComponent: Component { LauncherView { visible: false } }
     }
 
+    // Prewarm the launcher (and its clipboard tab) offscreen a few seconds
+    // after boot so the first real open doesn't stall on QML compilation.
+    Timer {
+        interval: 5000
+        running: !screenVisibilities.launcher
+        repeat: false
+        onTriggered: {
+            persistentLauncherViewLoader.active = true;
+            Qt.callLater(() => {
+                if (persistentLauncherViewLoader.item) {
+                    persistentLauncherViewLoader.item.prewarmTabs = true;
+                }
+            });
+        }
+    }
+
     Loader {
         id: persistentDashboardViewLoader
         active: false

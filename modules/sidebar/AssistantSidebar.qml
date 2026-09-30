@@ -561,88 +561,59 @@ Item {
                             }
                         }
 
-                        Process {
-                            id: clipboardTypesProcess
-                            command: ["wl-paste", "--list-types"]
-                            stdout: StdioCollector {
-                                onStreamFinished: {
-                                    let types = text.trim().split("\n");
+                        // Clipboard reads go through the daemon (the
+                        // selection owner serves its own offer; no wl-paste).
+                        QtObject {
+                            id: clipboardBridge
+
+                            function readMimes() {
+                                BackendService.call("clipboard.liveMimes", {}, (result, error) => {
+                                    if (error || !result) {
+                                        Ai.pushSystemMessage("Clipboard read failed.");
+                                        return;
+                                    }
+                                    const types = result.mimes || [];
                                     let imageType = "";
                                     for (let i = 0; i < types.length; i++) {
                                         if (types[i].startsWith("image/")) {
-                                            imageType = types[i].trim();
+                                            imageType = types[i];
                                             break;
                                         }
                                     }
                                     if (imageType.length > 0) {
-                                        clipboardImageProcess.mimeType = imageType;
-                                        clipboardImageProcess.running = true;
+                                        readContent(imageType, (mime, base64) => {
+                                            if (base64.length > 0) {
+                                                let ext = mime.split("/")[1] || "png";
+                                                mainChatArea.addAttachment(mime, base64, "clipboard." + ext);
+                                            } else {
+                                                Ai.pushSystemMessage("Clipboard image read returned no data.");
+                                            }
+                                        });
                                         return;
                                     }
                                     if (types.indexOf("text/uri-list") !== -1) {
-                                        clipboardUrisProcess.running = true;
+                                        readContent("text/uri-list", (mime, base64) => {
+                                            let data = "";
+                                            try { data = Qt.atob(base64).trim(); } catch (e) {}
+                                            if (data.length > 0)
+                                                mainChatArea.addAttachmentsFromUriList(data);
+                                            else
+                                                Ai.pushSystemMessage("Clipboard file list is empty.");
+                                        });
                                         return;
                                     }
                                     Ai.pushSystemMessage("Clipboard does not contain an image or file.");
-                                }
+                                });
                             }
-                            stderr: StdioCollector {
-                                id: clipboardTypesStderr
-                            }
-                            onExited: exitCode => {
-                                if (exitCode !== 0) {
-                                    let err = clipboardTypesStderr.text.trim();
-                                    Ai.pushSystemMessage("Clipboard read failed: " + (err.length > 0 ? err : "unknown error"));
-                                }
-                            }
-                        }
 
-                        Process {
-                            id: clipboardImageProcess
-                            property string mimeType: ""
-                            command: ["bash", "-c", "wl-paste --type \"" + mimeType + "\" 2>/dev/null | /usr/bin/base64 -w 0" ]
-                            stdout: StdioCollector {
-                                onStreamFinished: {
-                                    let data = text.trim();
-                                    if (data.length > 0) {
-                                        let ext = clipboardImageProcess.mimeType.split("/")[1] || "png";
-                                        mainChatArea.addAttachment(clipboardImageProcess.mimeType, data, "clipboard." + ext);
-                                    } else {
-                                        Ai.pushSystemMessage("Clipboard image read returned no data.");
+                            function readContent(mime, cb) {
+                                BackendService.call("clipboard.liveContent", {mime: mime}, (result, error) => {
+                                    if (error || !result || result.error) {
+                                        Ai.pushSystemMessage("Clipboard read failed: " + (result?.error || error || "unknown error"));
+                                        return;
                                     }
-                                }
-                            }
-                            stderr: StdioCollector {
-                                id: clipboardImageStderr
-                            }
-                            onExited: exitCode => {
-                                if (exitCode !== 0) {
-                                    let err = clipboardImageStderr.text.trim();
-                                    Ai.pushSystemMessage("Clipboard image read failed: " + (err.length > 0 ? err : "unknown error"));
-                                }
-                            }
-                        }
-
-                        Process {
-                            id: clipboardUrisProcess
-                            command: ["wl-paste", "--type", "text/uri-list"]
-                            stdout: StdioCollector {
-                                onStreamFinished: {
-                                    let data = text.trim();
-                                    if (data.length > 0)
-                                        mainChatArea.addAttachmentsFromUriList(data);
-                                    else
-                                        Ai.pushSystemMessage("Clipboard file list is empty.");
-                                }
-                            }
-                            stderr: StdioCollector {
-                                id: clipboardUrisStderr
-                            }
-                            onExited: exitCode => {
-                                if (exitCode !== 0) {
-                                    let err = clipboardUrisStderr.text.trim();
-                                    Ai.pushSystemMessage("Clipboard file read failed: " + (err.length > 0 ? err : "unknown error"));
-                                }
+                                    cb(result.mime, result.content_base64 || "");
+                                });
                             }
                         }
                         property bool isWelcome: Ai.currentChat.length === 0
@@ -850,8 +821,7 @@ Item {
                                                     }
 
                                                     onClicked: {
-                                                        let p = Qt.createQmlObject('import Quickshell; import Quickshell.Io; Process { command: ["wl-copy", "' + modelData.content.replace(/"/g, '\\"') + '"] }', parent);
-                                                        p.running = true;
+                                                        BackendService.call("clipboard.copyText", {text: modelData.content});
                                                     }
                                                 }
 
@@ -1460,7 +1430,7 @@ Item {
                                                     }
                                                 }
                                                 if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) {
-                                                    clipboardTypesProcess.running = true;
+                                                    clipboardBridge.readMimes();
                                                     return;
                                                 }
                                                 if (event.key === Qt.Key_Escape) {

@@ -27,6 +27,9 @@ Rectangle {
     property int leftPanelWidth: isCompact ? 464 : 300
     property int currentTab: GlobalStates.widgetsTabCurrentIndex  // 0=launcher, 1=clip, 2=emoji, 3=tmux, 4=notes
     property bool prefixDisabled: false  // Flag to prevent re-activation after backspace
+    // Boot-time prewarm: lets the notch load the clipboard tab offscreen
+    // so its first real open doesn't pay the QML compile cost
+    property bool prewarmTabs: false
 
     // Sync with GlobalStates
     onCurrentTabChanged: {
@@ -1089,7 +1092,7 @@ Rectangle {
         // Tab 1: Clipboard
         Loader {
             id: clipboardLoader
-            active: currentTab === 1 || item !== null
+            active: currentTab === 1 || item !== null || root.prewarmTabs
             sourceComponent: Component {
                 ClipboardTab {
                     leftPanelWidth: root.leftPanelWidth

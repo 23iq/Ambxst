@@ -644,9 +644,10 @@ Singleton {
 
     // handleNotifyRequest converts a CLI-driven notify.send event into a
     // tracked notification. Actions whose source object carries a
-    // `clipboard` field get a synthetic handler that runs wl-copy when
-    // the user clicks them, so cross-process flows (colorpicker formats)
-    // keep working without the CLI blocking on stdin.
+    // `clipboard` field get a synthetic handler that copies the value
+    // through the daemon (the selection owner) when the user clicks
+    // them, so cross-process flows (colorpicker formats) keep working
+    // without the CLI blocking on stdin.
     function handleNotifyRequest(data) {
         if (!data) return;
         const rawActions = data.actions || [];
@@ -662,10 +663,7 @@ Singleton {
             if (a.clipboard !== undefined && a.clipboard !== null) {
                 const value = a.clipboard;
                 actionHandlers[a.identifier] = function (_id) {
-                    Quickshell.execDetached([
-                        "bash", "-c",
-                        "printf '%s' " + JSON.stringify(value) + " | wl-copy --type text/plain"
-                    ]);
+                    BackendService.call("clipboard.copyText", {text: value});
                 };
             }
         }

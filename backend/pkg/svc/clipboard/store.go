@@ -27,12 +27,19 @@ import (
 // maxUnpinnedItems caps the unpinned history (pinned items are exempt).
 const maxUnpinnedItems = 50
 
+// vacuumThresholdPages is the free-page count above which a store is
+// worth rewriting: deleted image blobs accumulate fast and the bloated
+// file slows every subsequent operation.
+const vacuumThresholdPages = 1024
+
 // schemaSQL creates the item table + FTS5 index + sync triggers. Both
 // stores share it; the pinned column is kept for parity (always 1 in the
 // pinned store, 0 in the unpinned one) so reindex SQL stays uniform.
+// AUTOINCREMENT keeps ids stable across delete/insert cycles so QML-side
+// per-id caches can never alias a new item onto a deleted rowid.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS clipboard_items (
-	id INTEGER PRIMARY KEY,
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	content_hash TEXT NOT NULL UNIQUE,
 	mime_type TEXT NOT NULL,
 	preview BLOB,
@@ -42,6 +49,7 @@ CREATE TABLE IF NOT EXISTS clipboard_items (
 	pinned INTEGER DEFAULT 0,
 	display_index INTEGER DEFAULT 0,
 	alias TEXT,
+	mimes TEXT,
 	created_at INTEGER,
 	updated_at INTEGER
 );
@@ -55,6 +63,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
 	content='clipboard_items',
 	content_rowid='id'
 );
+` + schemaTriggersSQL
+
+// schemaTriggersSQL keeps the FTS index in sync with clipboard_items.
+const schemaTriggersSQL = `
 CREATE TRIGGER IF NOT EXISTS clipboard_items_ai AFTER INSERT ON clipboard_items BEGIN
 	INSERT INTO clipboard_fts(rowid, preview, full_content)
 	VALUES (new.id, new.preview, new.full_content);
@@ -126,6 +138,7 @@ type itemRow struct {
 	isImage, size     int
 	createdAt         int64
 	updatedAt         int64
+	mimes             string
 }
 
 // store owns the two encrypted SQLite databases (pinned + unpinned) and
@@ -202,7 +215,74 @@ func openDB(path, hexKey string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+// migrateSchema upgrades databases created before the mimes column and
+// AUTOINCREMENT ids. The upgrade rebuilds the table in place (dropping
+// and recreating the FTS triggers, which follow the renamed table) and
+// rebuilds the FTS index against the new rowids.
+func migrateSchema(db *sql.DB) error {
+	var createSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'clipboard_items';`).Scan(&createSQL); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if strings.Contains(createSQL, "AUTOINCREMENT") {
+		return nil
+	}
+	log.Printf("[clipboard] migrating store schema (ids + mimes column)")
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, trigger := range []string{"clipboard_items_ai", "clipboard_items_ad", "clipboard_items_au"} {
+		if _, err := tx.Exec(`DROP TRIGGER IF EXISTS ` + trigger + `;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`ALTER TABLE clipboard_items RENAME TO clipboard_items_old;`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE TABLE clipboard_items (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	content_hash TEXT NOT NULL UNIQUE,
+	mime_type TEXT NOT NULL,
+	preview BLOB,
+	full_content BLOB,
+	is_image INTEGER DEFAULT 0,
+	size INTEGER DEFAULT 0,
+	pinned INTEGER DEFAULT 0,
+	display_index INTEGER DEFAULT 0,
+	alias TEXT,
+	mimes TEXT,
+	created_at INTEGER,
+	updated_at INTEGER
+);`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO clipboard_items (id, content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, mimes, created_at, updated_at)
+SELECT id, content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, NULL, created_at, updated_at FROM clipboard_items_old;`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE clipboard_items_old;`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(schemaTriggersSQL); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`INSERT INTO clipboard_fts(clipboard_fts) VALUES('rebuild');`)
+	return err
 }
 
 // openDatabases opens (or reopens) both stores. The unpinned store lives
@@ -280,7 +360,7 @@ func (s *store) moveRowsTo(src *sql.DB, dstPath string) error {
 		return err
 	}
 	defer dst.Close()
-	rows, err := src.Query(`SELECT content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, created_at, updated_at FROM clipboard_items;`)
+	rows, err := src.Query(`SELECT content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, COALESCE(mimes, ''), created_at, updated_at FROM clipboard_items;`)
 	if err != nil {
 		return err
 	}
@@ -289,7 +369,7 @@ func (s *store) moveRowsTo(src *sql.DB, dstPath string) error {
 		var r itemRow
 		var alias sql.NullString
 		var pinnedFlag, displayIndex int
-		if err := rows.Scan(&r.hash, &r.mime, &r.preview, &r.content, &r.isImage, &r.size, &pinnedFlag, &displayIndex, &alias, &r.createdAt, &r.updatedAt); err != nil {
+		if err := rows.Scan(&r.hash, &r.mime, &r.preview, &r.content, &r.isImage, &r.size, &pinnedFlag, &displayIndex, &alias, &r.mimes, &r.createdAt, &r.updatedAt); err != nil {
 			return err
 		}
 		r.alias = alias.String
@@ -412,7 +492,7 @@ func (s *store) listItems() []map[string]any {
 		if db == nil {
 			return
 		}
-		rows, err := db.Query(`SELECT id, mime_type, preview, is_image, content_hash, size, pinned, display_index, alias, created_at, updated_at FROM clipboard_items ORDER BY display_index ASC, updated_at DESC, id DESC;`)
+		rows, err := db.Query(`SELECT id, mime_type, preview, is_image, content_hash, size, pinned, display_index, alias, mimes, created_at, updated_at FROM clipboard_items ORDER BY display_index ASC, updated_at DESC, id DESC;`)
 		if err != nil {
 			log.Printf("[clipboard] list: %v", err)
 			return
@@ -423,14 +503,21 @@ func (s *store) listItems() []map[string]any {
 			var mime, hash string
 			var preview []byte
 			var isImage, size, pinnedFlag, displayIndex int
-			var alias sql.NullString
+			var alias, mimes sql.NullString
 			var createdAt, updatedAt sql.NullInt64
-			if err := rows.Scan(&id, &mime, &preview, &isImage, &hash, &size, &pinnedFlag, &displayIndex, &alias, &createdAt, &updatedAt); err != nil {
+			if err := rows.Scan(&id, &mime, &preview, &isImage, &hash, &size, &pinnedFlag, &displayIndex, &alias, &mimes, &createdAt, &updatedAt); err != nil {
 				continue
 			}
 			var aliasVal any
 			if alias.Valid && alias.String != "" {
 				aliasVal = alias.String
+			}
+			var mimesVal any
+			if mimes.Valid && mimes.String != "" {
+				var parsed []string
+				if json.Unmarshal([]byte(mimes.String), &parsed) == nil && len(parsed) > 0 {
+					mimesVal = parsed
+				}
 			}
 			items = append(items, map[string]any{
 				"id":            fmt.Sprintf("%s:%d", prefix, id),
@@ -442,6 +529,7 @@ func (s *store) listItems() []map[string]any {
 				"pinned":        pinnedFlag,
 				"display_index": displayIndex,
 				"alias":         aliasVal,
+				"mimes":         mimesVal,
 				"created_at":    createdAt.Int64,
 				"updated_at":    updatedAt.Int64,
 			})
@@ -529,8 +617,8 @@ func (s *store) togglePin(id itemID) error {
 func readRow(db *sql.DB, id int64) (*itemRow, error) {
 	var r itemRow
 	var alias sql.NullString
-	err := db.QueryRow(`SELECT content_hash, mime_type, preview, full_content, is_image, size, alias, created_at, updated_at FROM clipboard_items WHERE id = ?;`, id).
-		Scan(&r.hash, &r.mime, &r.preview, &r.content, &r.isImage, &r.size, &alias, &r.createdAt, &r.updatedAt)
+	err := db.QueryRow(`SELECT content_hash, mime_type, preview, full_content, is_image, size, alias, COALESCE(mimes, ''), created_at, updated_at FROM clipboard_items WHERE id = ?;`, id).
+		Scan(&r.hash, &r.mime, &r.preview, &r.content, &r.isImage, &r.size, &alias, &r.mimes, &r.createdAt, &r.updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -542,10 +630,10 @@ func readRow(db *sql.DB, id int64) (*itemRow, error) {
 }
 
 func (s *store) upsert(db *sql.DB, r itemRow, pinnedFlag, displayIndex int) error {
-	_, err := db.Exec(`INSERT INTO clipboard_items (content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := db.Exec(`INSERT INTO clipboard_items (content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, mimes, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(content_hash) DO NOTHING;`,
-		r.hash, r.mime, r.preview, r.content, r.isImage, r.size, pinnedFlag, displayIndex, nullableString(r.alias), r.createdAt, r.updatedAt)
+		r.hash, r.mime, r.preview, r.content, r.isImage, r.size, pinnedFlag, displayIndex, nullableString(r.alias), nullableString(r.mimes), r.createdAt, r.updatedAt)
 	return err
 }
 
@@ -558,9 +646,9 @@ func insertTop(db *sql.DB, r itemRow, pinnedFlag bool) error {
 	if pinnedFlag {
 		flag = 1
 	}
-	_, err := db.Exec(`INSERT INTO clipboard_items (content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?);`,
-		r.hash, r.mime, r.preview, r.content, r.isImage, r.size, flag, nullableString(r.alias), r.createdAt, r.updatedAt)
+	_, err := db.Exec(`INSERT INTO clipboard_items (content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, alias, mimes, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?);`,
+		r.hash, r.mime, r.preview, r.content, r.isImage, r.size, flag, nullableString(r.alias), nullableString(r.mimes), r.createdAt, r.updatedAt)
 	return err
 }
 
@@ -664,8 +752,10 @@ UPDATE clipboard_items SET display_index = (SELECT new_idx FROM ranked WHERE ran
 
 // insertUnpinned stores new clipboard content in the unpinned history
 // (deduplicating by hash, bumping repeats to the top) and prunes the
-// history beyond maxUnpinnedItems. Returns whether content was present.
-func (s *store) insertUnpinned(mime string, content []byte, isImage bool, size int64) (bool, error) {
+// history beyond maxUnpinnedItems. Content that already exists in the
+// pinned store is not duplicated across stores. Returns whether the
+// unpinned store changed.
+func (s *store) insertUnpinned(mime string, mimes []string, content []byte, isImage bool, size int64) (bool, error) {
 	if !isImage && len(content) == 0 {
 		return false, nil
 	}
@@ -676,12 +766,29 @@ func (s *store) insertUnpinned(mime string, content []byte, isImage bool, size i
 	}
 	sum := md5.Sum(content)
 	hash := hex.EncodeToString(sum[:])
+
+	var pinnedCount int
+	if s.pinned != nil {
+		if err := s.pinned.QueryRow(`SELECT COUNT(1) FROM clipboard_items WHERE content_hash = ?;`, hash).Scan(&pinnedCount); err != nil {
+			pinnedCount = 0
+		}
+	}
+	if pinnedCount > 0 {
+		return false, nil
+	}
+
 	preview := makePreview(string(content), isImage)
 	now := time.Now().UnixMilli()
-	if _, err := s.unpinned.Exec(`INSERT INTO clipboard_items (content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-ON CONFLICT(content_hash) DO UPDATE SET updated_at = excluded.updated_at, display_index = 0;`,
-		hash, mime, preview, content, boolInt(isImage), size, now, now); err != nil {
+	var mimesVal any
+	if len(mimes) > 0 {
+		if data, err := json.Marshal(mimes); err == nil {
+			mimesVal = string(data)
+		}
+	}
+	if _, err := s.unpinned.Exec(`INSERT INTO clipboard_items (content_hash, mime_type, preview, full_content, is_image, size, pinned, display_index, mimes, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+ON CONFLICT(content_hash) DO UPDATE SET updated_at = excluded.updated_at, display_index = 0, mimes = excluded.mimes;`,
+		hash, mime, preview, content, boolInt(isImage), size, mimesVal, now, now); err != nil {
 		return false, err
 	}
 	if err := compact(s.unpinned); err != nil {
@@ -693,6 +800,56 @@ ON CONFLICT(content_hash) DO UPDATE SET updated_at = excluded.updated_at, displa
 		return true, err
 	}
 	return true, nil
+}
+
+// vacuum reclaims free pages left behind by the history churn (large
+// deleted image blobs accumulate fast otherwise). Holds the store mutex
+// for the duration; run it off the hot path.
+func (s *store) vacuum() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pinned != nil {
+		if _, err := s.pinned.Exec(`VACUUM;`); err != nil {
+			return err
+		}
+	}
+	if s.unpinned != nil {
+		if _, err := s.unpinned.Exec(`VACUUM;`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// freelistCounts reports free pages per store (0 when closed).
+func (s *store) freelistCounts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := func(db *sql.DB) int {
+		if db == nil {
+			return 0
+		}
+		var n int
+		_ = db.QueryRow(`PRAGMA freelist_count;`).Scan(&n)
+		return n
+	}
+	return count(s.pinned), count(s.unpinned)
+}
+
+// VacuumIfBloated rewrites the stores in the background when either has
+// accumulated too many free pages.
+func (s *store) VacuumIfBloated() {
+	pinned, unpinned := s.freelistCounts()
+	if pinned < vacuumThresholdPages && unpinned < vacuumThresholdPages {
+		return
+	}
+	log.Printf("[clipboard] vacuuming stores (freelist pinned=%d unpinned=%d)", pinned, unpinned)
+	start := time.Now()
+	if err := s.vacuum(); err != nil {
+		log.Printf("[clipboard] vacuum: %v", err)
+		return
+	}
+	log.Printf("[clipboard] vacuum done in %v", time.Since(start))
 }
 
 func makePreview(content string, isImage bool) string {
@@ -745,3 +902,4 @@ func (s *store) imageBlob(id itemID) ([]byte, string, error) {
 	}
 	return blob, mime, err
 }
+

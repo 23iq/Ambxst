@@ -1,7 +1,6 @@
 pragma Singleton
 import QtQuick
 import Quickshell
-import Quickshell.Io
 
 QtObject {
     id: root
@@ -17,9 +16,10 @@ QtObject {
     signal listCompleted()
 
     // All persistence lives in the Go daemon (two encrypted SQLite
-    // stores: pinned + unpinned). The watcher (wl-paste --watch) is also
-    // owned by the daemon and emits a "clipboard.refresh" event on every
-    // clipboard change; we just re-list.
+    // stores: pinned + unpinned). The watcher is a native wlr-data-control
+    // client owned by the daemon; it emits a "clipboard.refresh" event on
+    // every clipboard change and is the selection owner for every copy,
+    // so no wl-clipboard subprocesses are involved. We just re-list.
     property int clipboardWatchHandle: -1
     property bool _watchBound: false
 
@@ -122,6 +122,7 @@ QtObject {
                 });
             }
             root.items = clipboardItems;
+            root.pruneImageCaches();
             root.listCompleted();
         });
     }
@@ -142,12 +143,8 @@ QtObject {
                 console.warn("ClipboardService: delete failed:", error || "no data");
                 return;
             }
-            // Clear the live clipboard if it matches the deleted item
-            var deletedHash = result.hash || "";
-            if (deletedHash.length > 0) {
-                clearClipboardIfMatches.deletedHash = deletedHash;
-                clearClipboardIfMatches.running = true;
-            }
+            // The daemon clears the live selection itself when it still
+            // holds the deleted content (exact-byte hash comparison).
             Qt.callLater(root.list);
         });
     }
@@ -254,95 +251,93 @@ QtObject {
     }
 
     // Copy an item back to the clipboard (text, file URI or image blob).
+    // The daemon becomes the selection owner and records the copy itself,
+    // so no follow-up "check" pass is needed.
     function copyItem(id, mime) {
         BackendService.call("clipboard.copy", {id: id, mime: mime || ""}, (result, error) => {
             if (error) {
                 console.warn("ClipboardService: copy failed:", error);
-                return;
             }
-            Qt.callLater(root.checkClipboard);
         });
     }
 
-    function checkClipboard() {
-        BackendService.call("clipboard.check", {}, () => {
-            Qt.callLater(root.list);
-        });
-    }
-
-    // Load image data as data URL (images live as encrypted blobs now)
-    function decodeToDataUrl(id, mime) {
-        if (imageDataById[id]) {
+    // Load image data as data URL (images live as encrypted blobs now).
+    // Caches are keyed by "id|hash": rowids alone are not stable enough
+    // across stores, and the hash guarantees a recycled id can never
+    // serve a previous item's image.
+    function decodeToDataUrl(id, mime, hash) {
+        var key = cacheKey(id, hash);
+        if (imageDataById[key]) {
             return;
         }
         BackendService.call("clipboard.dataUrl", {id: id, mime: mime || ""}, (result, error) => {
             if (error || !result || !result.data_url) {
                 return;
             }
-            root.imageDataById[id] = result.data_url;
+            root.imageDataById[key] = result.data_url;
             root.revision++;
         });
     }
 
-    function getImageData(id) {
-        return imageDataById[id] || "";
+    function getImageData(id, hash) {
+        return imageDataById[cacheKey(id, hash)] || "";
     }
 
     // Materialize an image blob to a tmpfs path (drag-and-drop / open).
-    function requestImagePath(id) {
-        if (imagePathById[id]) {
+    function requestImagePath(id, hash) {
+        var key = cacheKey(id, hash);
+        if (imagePathById[key]) {
             return;
         }
         BackendService.call("clipboard.imagePath", {id: id}, (result, error) => {
             if (error || !result || !result.path) {
                 return;
             }
-            root.imagePathById[id] = result.path;
+            root.imagePathById[key] = result.path;
             root.revision++;
         });
     }
 
-    function getImagePath(id) {
-        return imagePathById[id] || "";
+    function getImagePath(id, hash) {
+        return imagePathById[cacheKey(id, hash)] || "";
     }
 
-    // Copy and paste emoji via Ctrl+V (handled by the daemon)
+    function cacheKey(id, hash) {
+        return id + "|" + (hash || "");
+    }
+
+    // Purge cache entries whose item no longer exists in the history.
+    function pruneImageCaches() {
+        var live = {};
+        for (var i = 0; i < items.length; i++) {
+            live[cacheKey(items[i].id, items[i].hash)] = true;
+        }
+        var changed = false;
+        for (var k in imageDataById) {
+            if (!live[k]) {
+                delete imageDataById[k];
+                changed = true;
+            }
+        }
+        for (var k2 in imagePathById) {
+            if (!live[k2]) {
+                delete imagePathById[k2];
+                changed = true;
+            }
+        }
+        if (changed) {
+            root.revision++;
+        }
+    }
+
+    // Copy and paste emoji via Ctrl+V (the daemon waits for selection
+    // ownership before typing, so a stale clipboard is never pasted)
     function copyAndTypeEmoji(emojiText) {
         BackendService.call("clipboard.emojiType", {emoji: emojiText}, (result, error) => {
             if (error) {
                 console.warn("ClipboardService: emojiType failed:", error);
             }
         });
-    }
-
-    // Clear system clipboard if it matches deleted item
-    property Process clearClipboardIfMatches: Process {
-        property string deletedHash: ""
-        running: false
-
-        command: ["sh", "-c",
-            "# Get current clipboard hash for different types\n" +
-            "CURRENT_HASH=''; " +
-            "if CONTENT=$(wl-paste --type text/uri-list 2>/dev/null); then " +
-            "  CURRENT_HASH=$(echo -n \"$CONTENT\" | tr -d '\\r' | md5sum | cut -d' ' -f1); " +
-            "elif CONTENT=$(wl-paste --type text/plain 2>/dev/null); then " +
-            "  CURRENT_HASH=$(echo -n \"$CONTENT\" | md5sum | cut -d' ' -f1); " +
-            "elif IMAGE_MIME=$(wl-paste --list-types 2>/dev/null | grep '^image/' | head -1); then " +
-            "  [ -n \"$IMAGE_MIME\" ] && CURRENT_HASH=$(wl-paste --type \"$IMAGE_MIME\" 2>/dev/null | md5sum | cut -d' ' -f1); " +
-            "fi; " +
-            "# Clear clipboard if hashes match\n" +
-            "if [ \"$CURRENT_HASH\" = '" + deletedHash + "' ]; then " +
-            "  wl-copy --clear 2>/dev/null || true; " +
-            "fi"
-        ]
-
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0 && !text.includes("No selection")) {
-                    console.warn("ClipboardService: clearClipboardIfMatches stderr:", text);
-                }
-            }
-        }
     }
 
     Component.onCompleted: {

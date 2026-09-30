@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -49,7 +48,8 @@ func runColorPicker() int {
 	// implementation used --action=... and blocked on the user's pick;
 	// the IPC channel can't wait synchronously for an action, so we
 	// embed each format's value in the action's `clipboard` field and let
-	// the QML side invoke wl-copy when the user clicks a button.
+	// the QML side copy it through the daemon when the user clicks a
+	// button.
 	action := []map[string]string{
 		{"identifier": "hex", "text": "Copy HEX", "clipboard": hexColor},
 		{"identifier": "rgb", "text": "Copy RGB", "clipboard": rgbColor},
@@ -111,16 +111,9 @@ func pruneStaleSwatches(current string) {
 	}
 }
 
-// copyText must not wait on wl-copy: it forks a clipboard-serving child
-// that inherits our pipes and lives until the content is replaced. Waiting
-// on it would stall everything queued after the copy.
+// copyText routes the copy through the running daemon, which owns the
+// clipboard selection via data-control. Without the daemon there is no
+// way to serve a selection, so failures are silently ignored.
 func copyText(text string) {
-	cmd := exec.Command("wl-copy", "--type", "text/plain")
-	cmd.Stdin = strings.NewReader(text)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		return
-	}
-	go func() { _ = cmd.Wait() }()
+	_, _ = newClient().Call("clipboard.copyText", map[string]any{"text": text})
 }

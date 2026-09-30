@@ -35,11 +35,18 @@ PanelWindow {
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
-    property Process copyOverlayProcess: Process {
-        id: copyOverlayProcess
-        command: ["bash", "-c", "cat \"" + root.imagePath + "\" | wl-copy --type image/png"]
-        onExited: exitCode => {
-            if (exitCode !== 0) console.warn("Overlay Copy Failed (Exit code: " + exitCode + ")")
+    property bool _copyRequested: false
+
+    onImagePathChanged: {
+        if (imagePath !== "" && !_copyRequested) {
+            _copyRequested = true;
+            BackendService.call("clipboard.copyFile", {path: imagePath, mime: "image/png"}, (result, error) => {
+                if (error || (result && result.error))
+                    console.warn("Overlay Copy Failed:", error || result.error);
+                _copyRequested = false;
+            });
+        } else if (imagePath === "") {
+            _copyRequested = false;
         }
     }
 

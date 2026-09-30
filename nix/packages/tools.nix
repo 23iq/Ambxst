@@ -14,8 +14,6 @@ with pkgs; [
   power-profiles-daemon
   sqlite
   upower
-  wl-clip-persist
-  wl-clipboard
   wlsunset
   wtype
   zenity

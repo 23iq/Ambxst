@@ -1,9 +1,9 @@
 package clipboard
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,14 +17,24 @@ import (
 )
 
 // Service owns the clipboard history (two encrypted SQLite stores: pinned
-// + unpinned, capped history, images as blobs) and watches the Wayland
-// clipboard. All state lives behind the store; this type only adapts IPC.
+// + unpinned, capped history, images as blobs) and the clipboard watcher.
+// The watcher is a native wlr-data-control client (no wl-clipboard
+// subprocesses, race-free self-copy tracking); it is also the selection
+// owner for every copy performed through this service. All state lives
+// behind the store; this type only adapts IPC.
 type Service struct {
-	paths      *paths.Paths
-	watch      *watchProc
-	initMu     sync.Mutex
-	store      *store
-	initErr    error
+	paths *paths.Paths
+
+	watchMu sync.Mutex
+	wl      *wlClient
+
+	subsMu sync.Mutex
+	subs   []*ipc.Subscriber
+
+	initMu  sync.Mutex
+	store   *store
+	initErr error
+
 	cacheMu    sync.Mutex
 	imageCache map[string]string
 }
@@ -60,6 +70,18 @@ func (s *Service) getStore() (*store, error) {
 	return st, nil
 }
 
+// Prewarm opens the encrypted stores in the background so the first
+// clipboard.list doesn't pay the (adiantum + FTS5) init cost, and
+// rewrites bloated stores left by history churn.
+func (s *Service) Prewarm() {
+	st, err := s.getStore()
+	if err != nil {
+		log.Printf("[clipboard] prewarm: %v", err)
+		return
+	}
+	st.VacuumIfBloated()
+}
+
 func (s *Service) Register(srv *ipc.Server) {
 	srv.Register(&ipc.Service{
 		Name: "clipboard",
@@ -79,15 +101,23 @@ func (s *Service) Register(srv *ipc.Server) {
 			"clearClipboard": s.clearClipboard,
 			"setTmpMode":     s.setTmpMode,
 			"check":          s.check,
+			"copyText":       s.copyText,
+			"copyData":       s.copyData,
+			"copyFile":       s.copyFile,
+			"liveMimes":      s.liveMimes,
+			"liveContent":    s.liveContent,
 		},
 		Subscribe: s.subscribe,
 	})
 }
 
 func (s *Service) Close() {
-	if s.watch != nil {
-		s.watch.stop()
+	s.watchMu.Lock()
+	if s.wl != nil {
+		s.wl.stop()
+		s.wl = nil
 	}
+	s.watchMu.Unlock()
 	s.initMu.Lock()
 	defer s.initMu.Unlock()
 	if s.store != nil {
@@ -95,10 +125,62 @@ func (s *Service) Close() {
 	}
 }
 
+// --- subscriber fan-out ---
+
+// Send broadcasts a service event to every live subscriber.
+func (s *Service) Send(service string, data any) {
+	s.subsMu.Lock()
+	live := s.subs[:0]
+	for _, sub := range s.subs {
+		select {
+		case <-sub.StopCh():
+			continue
+		default:
+		}
+		live = append(live, sub)
+		sub.Send(service, data)
+	}
+	s.subs = live
+	s.subsMu.Unlock()
+}
+
 func (s *Service) subscribe(sub *ipc.Subscriber) {
-	// Start the watcher only for the first subscriber; the watcher
-	// emits clipboard.refresh events on every change.
-	s.ensureWatcher(sub)
+	s.subsMu.Lock()
+	s.subs = append(s.subs, sub)
+	s.subsMu.Unlock()
+	s.ensureWatcher()
+}
+
+// ensureWatcher starts the native wlr-data-control watcher once. There is
+// no fallback: every supported compositor (Hyprland, Niri, Mango, any
+// wlroots derivative) implements the protocol.
+func (s *Service) ensureWatcher() {
+	s.watchMu.Lock()
+	defer s.watchMu.Unlock()
+	if s.wl != nil {
+		return
+	}
+	wl, err := startWayland(s)
+	if err != nil {
+		log.Printf("[clipboard] native watcher unavailable, clipboard history disabled: %v", err)
+		return
+	}
+	s.wl = wl
+}
+
+// captureContent stores freshly observed clipboard content. Returns
+// whether subscribers should refresh.
+func (s *Service) captureContent(mime string, mimes []string, content []byte, isImage bool, size int64) bool {
+	st, err := s.getStore()
+	if err != nil {
+		log.Printf("[clipboard] insert: %v", err)
+		return false
+	}
+	inserted, err := st.insertUnpinned(mime, mimes, content, isImage, size)
+	if err != nil {
+		log.Printf("[clipboard] insert: %v", err)
+	}
+	return inserted
 }
 
 // --- IPC handlers ---
@@ -148,7 +230,21 @@ func (s *Service) delete(params json.RawMessage) (any, error) {
 	if err != nil {
 		return map[string]any{"error": err.Error()}, nil
 	}
+	if hash != "" {
+		s.clearLiveIfHash(hash)
+	}
 	return map[string]any{"hash": hash}, nil
+}
+
+// clearLiveIfHash unsets the live selection when it still holds the
+// deleted content (hash comparison over exact captured bytes).
+func (s *Service) clearLiveIfHash(hash string) {
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl != nil && wl.liveHashValue() == hash {
+		wl.clearSelection()
+	}
 }
 
 func (s *Service) clear(_ json.RawMessage) (any, error) {
@@ -159,7 +255,14 @@ func (s *Service) clear(_ json.RawMessage) (any, error) {
 	if err := st.clearUnpinned(); err != nil {
 		return map[string]any{"error": err.Error()}, nil
 	}
-	exec.Command("wl-copy", "--clear").Run()
+	// Respond immediately; reclaim the freed pages off the hot path.
+	go st.VacuumIfBloated()
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl != nil {
+		wl.clearSelection()
+	}
 	return map[string]any{"ok": true}, nil
 }
 
@@ -243,7 +346,9 @@ func (s *Service) swap(params json.RawMessage) (any, error) {
 	return map[string]any{"ok": true}, nil
 }
 
-// copy puts an item's content back on the clipboard (text or image blob).
+// copy puts an item's content back on the clipboard (text, file URI or
+// image blob). The daemon becomes the selection owner with no subprocess
+// fork race; the QML side needs no follow-up "check" pass.
 func (s *Service) copy(params json.RawMessage) (any, error) {
 	var p struct {
 		ID   string `json:"id"`
@@ -265,15 +370,48 @@ func (s *Service) copy(params json.RawMessage) (any, error) {
 	if p.Mime != "" {
 		mime = p.Mime
 	}
-	cmd := exec.Command("wl-copy", "--type", mime)
-	cmd.Stdin = bytes.NewReader(content)
-	if err := cmd.Run(); err != nil {
+	if err := s.CopyData(mime, content); err != nil {
 		return map[string]any{"error": err.Error()}, nil
 	}
 	return map[string]any{"ok": true}, nil
 }
 
-// emojiType copies an emoji and types it via wtype.
+// CopyText makes the daemon the selection owner for a plain-text value.
+// Used by QML copy actions and CLI tools instead of spawning wl-copy.
+func (s *Service) CopyText(text string) error {
+	return s.CopyData("text/plain;charset=utf-8", []byte(text))
+}
+
+// CopyData serves arbitrary content as the clipboard selection.
+func (s *Service) CopyData(mime string, content []byte) error {
+	if mime == "" {
+		mime = "text/plain;charset=utf-8"
+	}
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl == nil {
+		return errors.New("clipboard watcher unavailable")
+	}
+	return wl.copyContent(mime, content)
+}
+
+// CopyFile serves a file's bytes as the clipboard selection (screenshots,
+// exported images) without shipping the payload over IPC.
+func (s *Service) CopyFile(path, mime string) error {
+	if mime == "" {
+		mime = "image/png"
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return s.CopyData(mime, content)
+}
+
+// emojiType copies an emoji and types it via wtype. The daemon waits for
+// the compositor to confirm our selection ownership before typing, so the
+// paste can never race a stale selection.
 func (s *Service) emojiType(params json.RawMessage) (any, error) {
 	var p struct {
 		Emoji string `json:"emoji"`
@@ -283,14 +421,14 @@ func (s *Service) emojiType(params json.RawMessage) (any, error) {
 	if emoji == "" {
 		return map[string]any{"error": "empty emoji"}, nil
 	}
-	cmd := exec.Command("wl-copy", "--type", "text/plain;charset=utf-8")
-	cmd.Stdin = strings.NewReader(emoji)
-	if err := cmd.Run(); err != nil {
-		return map[string]any{"error": err.Error()}, nil
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl == nil {
+		return map[string]any{"error": "clipboard watcher unavailable"}, nil
 	}
-	go func() {
-		exec.Command("bash", "-c", "sleep 0.25; wtype -M ctrl -P v -p v -m ctrl").Run()
-	}()
+	wl.copyTextAwait("text/plain;charset=utf-8", []byte(emoji))
+	exec.Command("wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl").Run()
 	return map[string]any{"ok": true}, nil
 }
 
@@ -302,10 +440,11 @@ func (s *Service) dataURL(params json.RawMessage) (any, error) {
 	}
 	json.Unmarshal(params, &p)
 	s.cacheMu.Lock()
-	defer s.cacheMu.Unlock()
 	if v, ok := s.imageCache[p.ID]; ok {
+		s.cacheMu.Unlock()
 		return map[string]any{"id": p.ID, "data_url": v}, nil
 	}
+	s.cacheMu.Unlock()
 	id, ok := parseID(p.ID)
 	if !ok {
 		return map[string]any{"error": "invalid id"}, nil
@@ -325,7 +464,9 @@ func (s *Service) dataURL(params json.RawMessage) (any, error) {
 		mime = "image/png"
 	}
 	url := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(blob)
+	s.cacheMu.Lock()
 	s.imageCache[p.ID] = url
+	s.cacheMu.Unlock()
 	return map[string]any{"id": p.ID, "data_url": url}, nil
 }
 
@@ -374,15 +515,20 @@ func (s *Service) imagePath(params json.RawMessage) (any, error) {
 	return map[string]any{"id": p.ID, "path": path}, nil
 }
 
+// clearClipboard unsets the live selection.
 func (s *Service) clearClipboard(_ json.RawMessage) (any, error) {
-	exec.Command("wl-copy", "--clear").Run()
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl != nil {
+		wl.clearSelection()
+	}
 	return map[string]any{"ok": true}, nil
 }
 
-// check runs a manual clipboard capture pass (the watcher normally does
-// this on every change; QML calls it after programmatic copies).
+// check is a no-op kept for IPC compatibility: both the native client and
+// the legacy watcher capture every clipboard change automatically.
 func (s *Service) check(_ json.RawMessage) (any, error) {
-	s.checkAndInsert()
 	return map[string]any{"ok": true}, nil
 }
 
@@ -402,4 +548,81 @@ func (s *Service) setTmpMode(params json.RawMessage) (any, error) {
 	}
 	log.Printf("[clipboard] tmpfs mode: %v", p.Enabled)
 	return map[string]any{"ok": true}, nil
+}
+
+// liveMimes reports the MIME types offered by the current selection
+// (tracked from the last data-control selection event).
+func (s *Service) liveMimes(_ json.RawMessage) (any, error) {
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl == nil {
+		return map[string]any{"mimes": []string{}}, nil
+	}
+	return map[string]any{"mimes": wl.liveMimes()}, nil
+}
+
+func (s *Service) copyText(params json.RawMessage) (any, error) {
+	var p struct {
+		Text string `json:"text"`
+	}
+	json.Unmarshal(params, &p)
+	if err := s.CopyText(p.Text); err != nil {
+		return map[string]any{"error": err.Error()}, nil
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func (s *Service) copyData(params json.RawMessage) (any, error) {
+	var p struct {
+		Mime          string `json:"mime"`
+		ContentBase64 string `json:"content_base64"`
+	}
+	json.Unmarshal(params, &p)
+	content, err := base64.StdEncoding.DecodeString(p.ContentBase64)
+	if err != nil {
+		return map[string]any{"error": "invalid base64 content"}, nil
+	}
+	if err := s.CopyData(p.Mime, content); err != nil {
+		return map[string]any{"error": err.Error()}, nil
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func (s *Service) copyFile(params json.RawMessage) (any, error) {
+	var p struct {
+		Path string `json:"path"`
+		Mime string `json:"mime"`
+	}
+	json.Unmarshal(params, &p)
+	if p.Path == "" {
+		return map[string]any{"error": "missing path"}, nil
+	}
+	if err := s.CopyFile(p.Path, p.Mime); err != nil {
+		return map[string]any{"error": err.Error()}, nil
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// liveContent reads the requested MIME type from the current selection
+// (equivalent of wl-paste, served through our own data-control offer).
+func (s *Service) liveContent(params json.RawMessage) (any, error) {
+	var p struct {
+		Mime string `json:"mime"`
+	}
+	json.Unmarshal(params, &p)
+	if p.Mime == "" {
+		p.Mime = "text/plain;charset=utf-8"
+	}
+	s.watchMu.Lock()
+	wl := s.wl
+	s.watchMu.Unlock()
+	if wl == nil {
+		return map[string]any{"error": "clipboard watcher unavailable"}, nil
+	}
+	content, err := wl.liveContent(p.Mime)
+	if err != nil {
+		return map[string]any{"error": err.Error()}, nil
+	}
+	return map[string]any{"mime": p.Mime, "content_base64": base64.StdEncoding.EncodeToString(content)}, nil
 }

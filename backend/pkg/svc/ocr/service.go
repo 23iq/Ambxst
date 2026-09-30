@@ -11,10 +11,19 @@ import (
 	"ambxst/backend/pkg/ipc"
 )
 
-type Service struct{}
+type Service struct {
+	// copyFn routes OCR results to the clipboard service (native
+	// data-control owner); wired by the daemon at boot.
+	copyFn func(text string) error
+}
 
 func NewService() *Service {
 	return &Service{}
+}
+
+// SetClipboardCopy wires the clipboard copy path (daemon boot).
+func (s *Service) SetClipboardCopy(fn func(text string) error) {
+	s.copyFn = fn
 }
 
 func (s *Service) Register(srv *ipc.Server) {
@@ -60,7 +69,7 @@ func (s *Service) text(params json.RawMessage) (any, error) {
 	}
 	text := strings.TrimSpace(string(out))
 	if text != "" {
-		copyText(text)
+		s.copyText(text)
 	}
 	return map[string]any{"text": text}, nil
 }
@@ -82,20 +91,16 @@ func (s *Service) barcode(params json.RawMessage) (any, error) {
 		return nil, err
 	}
 	if content != "" {
-		copyText(content)
+		s.copyText(content)
 	}
 	return map[string]any{"content": content}, nil
 }
 
-// copyText spawns wl-copy detached: its clipboard-serving child inherits
-// nothing and the handler returns immediately.
-func copyText(text string) {
-	cmd := exec.Command("wl-copy", "--type", "text/plain")
-	cmd.Stdin = strings.NewReader(text)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
+// copyText routes the text to the clipboard service when wired; without
+// the daemon wiring there is nothing to own the selection.
+func (s *Service) copyText(text string) {
+	if s.copyFn == nil {
 		return
 	}
-	go func() { _ = cmd.Wait() }()
+	_ = s.copyFn(text)
 }

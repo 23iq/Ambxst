@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -19,10 +18,18 @@ import (
 type Service struct {
 	paths *paths.Paths
 	mu    sync.Mutex
+	// copyFn routes clipboard copies through the clipboard service
+	// (native data-control owner); wired by the daemon at boot.
+	copyFn func(path, mime string) error
 }
 
 func NewService(p *paths.Paths) *Service {
 	return &Service{paths: p}
+}
+
+// SetClipboardCopy wires the clipboard copy path (daemon boot).
+func (s *Service) SetClipboardCopy(fn func(path, mime string) error) {
+	s.copyFn = fn
 }
 
 func (s *Service) Register(srv *ipc.Server) {
@@ -147,8 +154,8 @@ func (s *Service) capture(params json.RawMessage) (any, error) {
 		}
 	}
 
-	if p.Clipboard {
-		copyFileToClipboard(outPath)
+	if p.Clipboard && s.copyFn != nil {
+		_ = s.copyFn(outPath, "image/png")
 	}
 
 	return map[string]any{"path": outPath, "width": w, "height": h}, nil
@@ -203,17 +210,6 @@ func (s *Service) saveCapture(result *screenshot.CaptureResult, filename string)
 		return "", 0, 0, err
 	}
 	return outPath, result.Buffer.Width, result.Buffer.Height, nil
-}
-
-func copyFileToClipboard(path string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	cmd := exec.Command("wl-copy", "--type", "image/png")
-	cmd.Stdin = f
-	_ = cmd.Run()
 }
 
 func screenshotsDir(p *paths.Paths) string {
