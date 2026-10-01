@@ -4,6 +4,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import Quickshell.Services.Notifications
 import qs.modules.services
 
@@ -592,12 +593,38 @@ Singleton {
         cacheSaveTimer.restart();
     }
 
+    // ---- Image cache plumbing -------------------------------------------
+    // Provider-backed images (image://, produced from raw D-Bus image_data
+    // hints) can only be resolved by rendering them inside a scene, and
+    // this singleton has none. A small transparent layer surface hosts the
+    // render jobs; it reserves no exclusive zone and accepts no input.
+
+    property var cacheWindow: null
+
+    Component {
+        id: cacheWindowComponent
+
+        PanelWindow {
+            color: "transparent"
+            exclusionMode: ExclusionMode.Ignore
+            exclusiveZone: 0
+            visible: true
+            implicitWidth: 512
+            implicitHeight: 512
+            mask: Region {
+                item: null
+            }
+            anchors {
+                top: true
+                left: true
+            }
+            WlrLayershell.namespace: "ambxst:notification-cache"
+        }
+    }
+
     Component {
         id: imageCacheJob
 
-        // Canvas with canvasType Image paints via the software rasterizer
-        // into an image buffer, so it works inside this windowless
-        // singleton. We downscale to maxSize to keep the data URIs small.
         Canvas {
             id: job
 
@@ -605,11 +632,12 @@ Singleton {
             required property var callback
             readonly property int maxSize: 512
             property bool painted: false
+            property bool done: false
 
             renderTarget: Canvas.Image
+            renderStrategy: Canvas.Immediate
             width: 1
             height: 1
-            visible: false
 
             property Image sourceImage: Image {
                 source: job.imageUrl
@@ -645,8 +673,9 @@ Singleton {
             }
 
             onPainted: {
-                if (!painted)
+                if (!painted || done)
                     return;
+                done = true;
                 try {
                     finish(toDataURL("image/png"));
                 } catch (e) {
@@ -664,7 +693,9 @@ Singleton {
     }
 
     function cacheProviderImage(imageUrl, callback) {
-        imageCacheJob.createObject(root, {
+        if (!root.cacheWindow)
+            root.cacheWindow = cacheWindowComponent.createObject(root);
+        imageCacheJob.createObject(root.cacheWindow.contentItem, {
             "imageUrl": imageUrl,
             "callback": callback
         });
