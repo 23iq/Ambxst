@@ -50,12 +50,12 @@ Singleton {
 
                 // Cachear imágenes
                 if (appIcon && !appIcon.startsWith("data:")) {
-                    root.cacheImageAsBase64(appIcon, function (cachedData) {
+                    root.cacheImage(appIcon, function (cachedData) {
                         cachedAppIcon = cachedData;
                     });
                 }
                 if (image && !image.startsWith("data:")) {
-                    root.cacheImageAsBase64(image, function (cachedData) {
+                    root.cacheImage(image, function (cachedData) {
                         cachedImage = cachedData;
                     });
                 }
@@ -539,84 +539,25 @@ Singleton {
         root.list = root.list.slice(0);
     }
 
-    property int activeXhrCount: 0
-    property int maxConcurrentXhr: 3
-
-    function cacheImageAsBase64(imageUrl, callback) {
+    // cacheImage materializes a notification image through the daemon's
+    // hash-keyed disk cache and returns a stable file path that survives
+    // shell reloads. Falls back to the original source on any failure.
+    function cacheImage(imageUrl, callback) {
         if (!imageUrl || imageUrl.startsWith("data:")) {
             callback(imageUrl);
             return;
         }
 
-        if (!imageUrl.startsWith("http://") && !imageUrl.startsWith("https://")) {
+        const isRemote = imageUrl.startsWith("http://") || imageUrl.startsWith("https://");
+        const isLocal = imageUrl.startsWith("file://") || imageUrl.startsWith("/");
+        if (!isRemote && !isLocal) {
             callback(imageUrl);
             return;
         }
 
-        if (imageUrl.length > 2048) {
-            callback(imageUrl);
-            return;
-        }
-
-        if (activeXhrCount >= maxConcurrentXhr) {
-            callback(imageUrl);
-            return;
-        }
-
-        activeXhrCount++;
-        var xhr = new XMLHttpRequest();
-        xhr.open("GET", imageUrl, true);
-        xhr.responseType = "arraybuffer";
-        xhr.timeout = 5000;
-
-        var cleanupXhr = function () {
-            activeXhrCount--;
-            xhr = null;
-        };
-
-        xhr.onload = function () {
-            if (xhr.status === 200 && xhr.response) {
-                try {
-                    var arrayBuffer = xhr.response;
-                    var bytes = new Uint8Array(arrayBuffer);
-                    var binary = '';
-                    var len = Math.min(bytes.byteLength, 1024 * 1024);
-                    for (var i = 0; i < len; i++) {
-                        binary += String.fromCharCode(bytes[i]);
-                    }
-                    var base64 = btoa(binary);
-
-                    var mimeType = "image/png";
-                    var lowerUrl = imageUrl.toLowerCase();
-                    if (lowerUrl.includes(".jpg") || lowerUrl.includes(".jpeg")) {
-                        mimeType = "image/jpeg";
-                    } else if (lowerUrl.includes(".gif")) {
-                        mimeType = "image/gif";
-                    } else if (lowerUrl.includes(".webp")) {
-                        mimeType = "image/webp";
-                    }
-
-                    callback("data:" + mimeType + ";base64," + base64);
-                } catch (e) {
-                    callback(imageUrl);
-                }
-            } else {
-                callback(imageUrl);
-            }
-            cleanupXhr();
-        };
-
-        xhr.onerror = function () {
-            callback(imageUrl);
-            cleanupXhr();
-        };
-
-        xhr.ontimeout = function () {
-            callback(imageUrl);
-            cleanupXhr();
-        };
-
-        xhr.send();
+        BackendService.call("notify.cacheImage", {url: imageUrl}, function (result, error) {
+            callback(result?.path ?? imageUrl);
+        });
     }
 
     Component.onCompleted: {

@@ -165,7 +165,7 @@ func New() (*Daemon, error) {
 	// notify — exposes notify.send so CLIs (colorpicker, screen, …) can
 	// route their notifications through the running shell instead of
 	// shelling out to notify-send. See pkg/svc/notify for the rationale.
-	notifySvc := notifysvc.NewService()
+	notifySvc := notifysvc.NewService(p)
 	notifySvc.Register(d.srv)
 
 	// system.shutdown → triggers the same exit path as a terminal signal.

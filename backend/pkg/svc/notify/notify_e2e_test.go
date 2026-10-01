@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ambxst/backend/pkg/ipc"
+	"ambxst/backend/pkg/paths"
 )
 
 // e2e spins up a real ipc.Server with the notify service registered,
@@ -19,7 +20,7 @@ func TestE2E_SendTriggersSubscriberEvent(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "notify.sock")
 
 	srv := ipc.NewServer(sockPath)
-	svc := NewService()
+	svc := NewService(&paths.Paths{CacheDir: t.TempDir()})
 	svc.Register(srv)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)

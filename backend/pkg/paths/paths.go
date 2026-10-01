@@ -71,6 +71,12 @@ func (p *Paths) UpdateCheckFile() string {
 	return filepath.Join(p.CacheDir, "update_check.json")
 }
 
+// NotificationsImageCacheDir holds notification images fetched from
+// remote URLs so references survive shell reloads.
+func (p *Paths) NotificationsImageCacheDir() string {
+	return filepath.Join(p.CacheDir, "notification_images")
+}
+
 func (p *Paths) ColorsFile() string {
 	return filepath.Join(p.CacheDir, "colors.json")
 }
