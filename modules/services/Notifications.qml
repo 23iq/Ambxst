@@ -52,11 +52,13 @@ Singleton {
                 if (appIcon && !appIcon.startsWith("data:")) {
                     root.cacheImage(appIcon, function (cachedData) {
                         cachedAppIcon = cachedData;
+                        root.scheduleCacheSave();
                     });
                 }
                 if (image && !image.startsWith("data:")) {
                     root.cacheImage(image, function (cachedData) {
                         cachedImage = cachedData;
+                        root.scheduleCacheSave();
                     });
                 }
 
@@ -539,12 +541,25 @@ Singleton {
         root.list = root.list.slice(0);
     }
 
-    // cacheImage materializes a notification image through the daemon's
+    // cacheImage materializes a notification image into the daemon's
     // hash-keyed disk cache and returns a stable file path that survives
     // shell reloads. Falls back to the original source on any failure.
+    //
+    // Sources come in three flavors:
+    //   - data: URIs        → passed straight to the daemon
+    //   - image:// URLs     → Quickshell's in-process image provider
+    //     (raw image_data D-Bus hints land here). The daemon can't
+    //     resolve these, so we re-encode to a PNG data URI via Canvas
+    //     and let the daemon persist it as a blob.
+    //   - http(s) / file:// / local paths → sent to the daemon as-is
     function cacheImage(imageUrl, callback) {
         if (!imageUrl || imageUrl.startsWith("data:")) {
             callback(imageUrl);
+            return;
+        }
+
+        if (imageUrl.startsWith("image://")) {
+            cacheProviderImage(imageUrl, callback);
             return;
         }
 
@@ -556,7 +571,102 @@ Singleton {
         }
 
         BackendService.call("notify.cacheImage", {url: imageUrl}, function (result, error) {
-            callback(result?.path ?? imageUrl);
+            if (!result?.path) {
+                callback(imageUrl);
+                return;
+            }
+            const path = result.path.startsWith("/") ? "file://" + result.path : result.path;
+            callback(path);
+        });
+    }
+
+    // Caching runs at most twice per notification (icon + image); debounce
+    // the resulting disk writes instead of saving on every callback.
+    Timer {
+        id: cacheSaveTimer
+        interval: 1000
+        onTriggered: root.saveNotifications()
+    }
+
+    function scheduleCacheSave() {
+        cacheSaveTimer.restart();
+    }
+
+    Component {
+        id: imageCacheJob
+
+        // Canvas with canvasType Image paints via the software rasterizer
+        // into an image buffer, so it works inside this windowless
+        // singleton. We downscale to maxSize to keep the data URIs small.
+        Canvas {
+            id: job
+
+            required property string imageUrl
+            required property var callback
+            readonly property int maxSize: 512
+            property bool painted: false
+
+            renderTarget: Canvas.Image
+            width: 1
+            height: 1
+            visible: false
+
+            property Image sourceImage: Image {
+                source: job.imageUrl
+                asynchronous: true
+                cache: false
+
+                onStatusChanged: {
+                    if (status === Image.Ready)
+                        job.setupCanvas();
+                    else if (status === Image.Error)
+                        job.finish(null);
+                }
+            }
+
+            function setupCanvas() {
+                const iw = sourceImage.implicitWidth;
+                const ih = sourceImage.implicitHeight;
+                if (iw <= 0 || ih <= 0) {
+                    finish(null);
+                    return;
+                }
+                const scale = Math.min(1, maxSize / Math.max(iw, ih));
+                width = Math.max(1, Math.round(iw * scale));
+                height = Math.max(1, Math.round(ih * scale));
+                requestPaint();
+            }
+
+            onPaint: {
+                const ctx = getContext("2d");
+                ctx.clearRect(0, 0, width, height);
+                ctx.drawImage(sourceImage, 0, 0, width, height);
+                painted = true;
+            }
+
+            onPainted: {
+                if (!painted)
+                    return;
+                try {
+                    finish(toDataURL("image/png"));
+                } catch (e) {
+                    finish(null);
+                }
+            }
+
+            function finish(result) {
+                const cb = callback;
+                destroy();
+                if (cb)
+                    cb(result ? result : imageUrl);
+            }
+        }
+    }
+
+    function cacheProviderImage(imageUrl, callback) {
+        imageCacheJob.createObject(root, {
+            "imageUrl": imageUrl,
+            "callback": callback
         });
     }
 
