@@ -4,25 +4,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"ambxst/backend/pkg/ipc"
 	"ambxst/backend/pkg/paths"
+	"ambxst/backend/pkg/states"
 )
 
 const stateKey = "caffeine"
+
+// restoreDeadline bounds the boot-time retry loop. Var so tests can shorten it.
+var restoreDeadline = 15 * time.Second
+
+// retryInterval is var for the same reason.
+var retryInterval = 250 * time.Millisecond
 
 // Service wraps an axctl idle inhibitor handle. It tracks a single inhibitor
 // created on demand and tears it down on disable / shutdown.
 type Service struct {
 	paths *paths.Paths
 	mu    sync.Mutex
-	id    int
-	want  bool
+	// opMu serializes whole set/restore sequences (read id → create/update)
+	// so two concurrent callers can't both create an inhibitor.
+	opMu sync.Mutex
+	id   int
+	want bool
 
 	runFn func(args ...string) ([]byte, error)
 
@@ -101,33 +111,9 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) loadPersisted() bool {
-	data, err := os.ReadFile(s.paths.StatesFile())
-	if err != nil {
-		return false
-	}
-	doc := map[string]any{}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return false
-	}
+	doc := states.Read(s.paths.StatesFile())
 	v, ok := doc[stateKey].(bool)
 	return ok && v
-}
-
-func (s *Service) persist(v bool) {
-	doc := map[string]any{}
-	if data, err := os.ReadFile(s.paths.StatesFile()); err == nil {
-		_ = json.Unmarshal(data, &doc)
-	}
-	doc[stateKey] = v
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := s.paths.StatesFile() + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, s.paths.StatesFile())
 }
 
 type inhibitorCreateResp struct {
@@ -173,6 +159,8 @@ func (s *Service) set(params json.RawMessage) (any, error) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
 	}
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
 	id := s.id
 	s.mu.Unlock()
@@ -194,7 +182,7 @@ func (s *Service) set(params json.RawMessage) (any, error) {
 		s.want = p.Inhibit
 		s.mu.Unlock()
 	}
-	s.persist(p.Inhibit)
+	states.SetKey(s.paths.StatesFile(), stateKey, p.Inhibit)
 	s.broadcast()
 	return map[string]any{"inhibit": p.Inhibit, "id": s.snapshotID()}, nil
 }
@@ -208,6 +196,8 @@ func (s *Service) get(_ json.RawMessage) (any, error) {
 // Restore is called once at boot to re-arm the inhibitor if it was active
 // the last time the daemon died.
 func (s *Service) Restore(_ json.RawMessage) (any, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	if !s.loadPersisted() {
 		return map[string]any{"inhibit": false}, nil
 	}
@@ -218,7 +208,7 @@ func (s *Service) Restore(_ json.RawMessage) (any, error) {
 		s.broadcast()
 		return map[string]any{"inhibit": true}, nil
 	}
-	id, err := s.create(true)
+	id, err := s.createWithRetry(true, restoreDeadline)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +218,24 @@ func (s *Service) Restore(_ json.RawMessage) (any, error) {
 	s.mu.Unlock()
 	s.broadcast()
 	return map[string]any{"inhibit": true, "id": id}, nil
+}
+
+// createWithRetry retries `axctl idle-inhibitor-create` until it succeeds
+// or the deadline elapses. At boot the axctl daemon socket may take a
+// while to bind; without the retry a single early failure left caffeine
+// silently off for the whole session even though it was persisted on.
+func (s *Service) createWithRetry(enable bool, deadline time.Duration) (int, error) {
+	end := time.Now().Add(deadline)
+	for {
+		id, err := s.create(enable)
+		if err == nil {
+			return id, nil
+		}
+		if !time.Now().Before(end) {
+			return 0, err
+		}
+		time.Sleep(retryInterval)
+	}
 }
 
 func (s *Service) snapshotID() int {

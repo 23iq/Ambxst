@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"ambxst/backend/pkg/paths"
 )
@@ -24,14 +26,17 @@ func newTestService(t *testing.T) (*Service, *fakeRunner) {
 }
 
 type fakeRunner struct {
-	calls  [][]string
-	create []byte
+	mu         sync.Mutex
+	calls      [][]string
+	create     []byte
 	createErr  error
-	setErr    error
+	setErr     error
 	destroyErr error
 }
 
 func (f *fakeRunner) run(args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, args)
 	switch args[0] {
 	case "system":
@@ -99,6 +104,32 @@ func TestRestoreAfterReboot(t *testing.T) {
 	}
 	m := out.(map[string]any)
 	if m["inhibit"] != true || m["id"] != 99 {
+		t.Fatalf("got %v", m)
+	}
+}
+
+func TestRestoreRetriesUntilAxctlReady(t *testing.T) {
+	s, f := newTestService(t)
+	if err := os.WriteFile(s.paths.StatesFile(), []byte(`{"caffeine": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreDeadline = time.Second
+	retryInterval = 5 * time.Millisecond
+	t.Cleanup(func() { restoreDeadline = 15 * time.Second; retryInterval = 250 * time.Millisecond })
+
+	f.createErr = errors.New("socket not ready")
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		f.mu.Lock()
+		f.createErr = nil
+		f.create = []byte(`{"id": 3}`)
+		f.mu.Unlock()
+	}()
+	out, err := s.Restore(nil)
+	if err != nil {
+		t.Fatalf("restore should succeed after retry: %v", err)
+	}
+	if m := out.(map[string]any); m["id"] != 3 {
 		t.Fatalf("got %v", m)
 	}
 }

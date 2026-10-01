@@ -9,6 +9,7 @@ import (
 
 	"ambxst/backend/pkg/ipc"
 	"ambxst/backend/pkg/paths"
+	"ambxst/backend/pkg/states"
 )
 
 // Service becomes the single owner of config/state file writes.
@@ -231,19 +232,11 @@ func (s *Service) stateSet(params json.RawMessage) (any, error) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc := loadJSON(s.paths.StatesFile())
 	var val any
 	if err := json.Unmarshal(p.Value, &val); err != nil {
 		val = nil
 	}
-	doc[p.Key] = val
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := atomicWrite(s.paths.StatesFile(), out); err != nil {
+	if err := states.SetKey(s.paths.StatesFile(), p.Key, val); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil
@@ -251,25 +244,26 @@ func (s *Service) stateSet(params json.RawMessage) (any, error) {
 
 // statesGet returns the whole states document.
 func (s *Service) statesGet(params json.RawMessage) (any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return loadJSON(s.paths.StatesFile()), nil
+	return states.Read(s.paths.StatesFile()), nil
 }
 
-// statesSet replaces the whole states document (merge-update safe).
+// statesSet merges the given top-level keys into the states document.
+// Merging (instead of replacing) keeps keys the caller's snapshot predates,
+// e.g. caffeine restored by the daemon after QML loaded its copy.
 func (s *Service) statesSet(params json.RawMessage) (any, error) {
 	var p struct {
-		Data json.RawMessage `json:"data"`
+		Data map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
 	}
-	if !json.Valid(p.Data) {
+	if p.Data == nil {
 		return nil, fmt.Errorf("invalid states json")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return nil, atomicWrite(s.paths.StatesFile(), p.Data)
+	if err := states.Merge(s.paths.StatesFile(), p.Data); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
 }
 
 // --- helpers ---
