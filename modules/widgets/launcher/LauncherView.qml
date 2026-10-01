@@ -30,6 +30,9 @@ Rectangle {
     // Boot-time prewarm: lets the notch load the clipboard tab offscreen
     // so its first real open doesn't pay the QML compile cost
     property bool prewarmTabs: false
+    // Sticky load flag: replaces `item !== null` in the clipboard loader's
+    // active binding (referencing item there is a binding loop)
+    property bool clipboardEverLoaded: false
 
     // Sync with GlobalStates
     onCurrentTabChanged: {
@@ -1090,9 +1093,6 @@ Rectangle {
         currentIndex: currentTab - 1
 
         // Tab 1: Clipboard
-        // Sticky load: clipboardEverLoaded replaces `item !== null` in the
-        // active binding (referencing item there is a binding loop).
-        property bool clipboardEverLoaded: false
         Loader {
             id: clipboardLoader
             active: currentTab === 1 || root.clipboardEverLoaded || root.prewarmTabs
@@ -1113,7 +1113,7 @@ Rectangle {
                 }
             }
             onLoaded: {
-                root.clipboardEverLoaded = true;
+                Qt.callLater(() => { root.clipboardEverLoaded = true; });
                 if (currentTab === 1 && item && item.focusSearchInput) {
                     root.focusSearchInput();
                 }
