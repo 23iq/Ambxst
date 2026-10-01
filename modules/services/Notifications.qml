@@ -562,11 +562,13 @@ Singleton {
         if (imageUrl.startsWith("image://")) {
             cacheProviderImage(imageUrl, function (tmpPath) {
                 if (!tmpPath) {
+                    console.warn("Notifications: provider image cache job failed:", imageUrl);
                     callback(imageUrl);
                     return;
                 }
                 BackendService.call("notify.cacheImage", {url: tmpPath}, function (result, error) {
                     if (!result?.path) {
+                        console.warn("Notifications: daemon cacheImage failed:", error ?? "no path");
                         callback(imageUrl);
                         return;
                     }
@@ -720,6 +722,7 @@ Singleton {
                 done = true;
                 grabToImage(result => {
                     if (!result || !result.image || !result.saveToFile(root.cacheTmpPath())) {
+                        console.warn("Notifications: grabToImage failed for", job.imageUrl);
                         finish(null);
                         return;
                     }
