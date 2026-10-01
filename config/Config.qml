@@ -592,6 +592,9 @@ Singleton {
             property bool alwaysShowNumbers: false
             property bool showNumbers: false
             property bool dynamic: false
+            property bool showSpecialWorkspace: true
+            property int specialWorkspaceAnimationDuration: 100
+            property string specialWorkspaceFont: ""
         }
     }
 

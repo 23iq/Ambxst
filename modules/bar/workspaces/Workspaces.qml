@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
@@ -16,6 +17,20 @@ Item {
     required property var bar
     required property string orientation
     readonly property var monitor: AxctlService.monitorFor(bar.screen)
+    readonly property string specialWorkspaceName: Config.workspaces.showSpecialWorkspace
+        ? (CompositorData.specialWorkspaceNames[bar.screen.name] || "") : ""
+    readonly property bool specialWorkspaceActive: specialWorkspaceName.length > 0
+    property real specialBlur: specialWorkspaceActive && !workspaceHover.hovered ? 1 : 0
+
+    Behavior on specialBlur {
+        NumberAnimation {
+            duration: Config.animDuration > 0 ? Math.max(0, Config.workspaces.specialWorkspaceAnimationDuration) : 0
+            easing.type: Easing.OutQuad
+        }
+    }
+
+    HoverHandler { id: workspaceHover }
+
     readonly property Toplevel activeWindow: ToplevelManager.activeToplevel
 
     // Niri's workspaces are created and destroyed on demand, so the
@@ -31,7 +46,7 @@ Item {
     property real radius: Styling.radius(0)
     property real startRadius: radius
     property real endRadius: radius
-    
+
     property int baseSize: 36
     property int workspaceButtonSize: baseSize - widgetPadding * 2
     property int workspaceButtonWidth: workspaceButtonSize
@@ -68,7 +83,7 @@ Item {
     function updateWorkspaceOccupied() {
         if (dynamicMode) {
             // Get occupied workspace IDs using the precomputed occupation map, sorted and limited by 'shown'
-            const occupiedIds = AxctlService.workspaces.values.filter(ws => CompositorData.workspaceOccupationMap[ws.id]).map(ws => ws.id).sort((a, b) => a - b).slice(0, Config.workspaces.shown);
+            const occupiedIds = AxctlService.workspaces.values.filter(ws => !String(ws.name || "").startsWith("special:") && CompositorData.workspaceOccupationMap[ws.id]).map(ws => ws.id).sort((a, b) => a - b).slice(0, Config.workspaces.shown);
 
             // Always include active workspace, even if empty
             const activeId = (monitor && monitor.activeWorkspace ? monitor.activeWorkspace.id : undefined) || 1;
@@ -194,7 +209,7 @@ Item {
         variant: "bg"
         anchors.fill: parent
         enableShadow: Config.showBackground && (!effectiveContainBar || Config.bar.keepBarShadow)
-        
+
         topLeftRadius: orientation === "vertical" ? workspacesWidget.startRadius : workspacesWidget.startRadius
         topRightRadius: orientation === "vertical" ? workspacesWidget.startRadius : workspacesWidget.endRadius
         bottomLeftRadius: orientation === "vertical" ? workspacesWidget.endRadius : workspacesWidget.startRadius
@@ -222,7 +237,23 @@ Item {
     }
 
     Item {
+        id: regularWorkspaces
+        anchors.fill: parent
+        scale: 1 - 0.08 * workspacesWidget.specialBlur
+        layer.enabled: workspacesWidget.specialBlur > 0
+        layer.smooth: true
+        layer.effect: MultiEffect {
+            brightness: -0.1 * workspacesWidget.specialBlur
+            blurEnabled: true
+            blur: workspacesWidget.specialBlur
+            blurMax: 32
+        }
+
+    }
+
+    Item {
         id: rowLayout
+        parent: regularWorkspaces
         visible: orientation === "horizontal"
         z: 1
 
@@ -274,6 +305,7 @@ Item {
 
     Item {
         id: columnLayout
+        parent: regularWorkspaces
         visible: orientation === "vertical"
         z: 1
 
@@ -326,6 +358,7 @@ Item {
     // Horizontal active workspace highlight
     StyledRect {
         id: activeHighlightH
+        parent: regularWorkspaces
         variant: "primary"
         visible: orientation === "horizontal"
         z: 2
@@ -342,7 +375,7 @@ Item {
             const currentWorkspaceHasWindows = CompositorData.workspaceOccupationMap[activeWorkspaceId];
             if (workspacesWidget.radius === 0)
                 return 0;
-            return currentWorkspaceHasWindows ? workspacesWidget.radius > 0 ? Math.max(workspacesWidget.radius - parent.widgetPadding - activeWorkspaceMargin, 0) : 0 : implicitHeight / 2;
+            return currentWorkspaceHasWindows ? workspacesWidget.radius > 0 ? Math.max(workspacesWidget.radius - workspacesWidget.widgetPadding - activeWorkspaceMargin, 0) : 0 : implicitHeight / 2;
         }
 
         anchors.verticalCenter: parent.verticalCenter
@@ -382,6 +415,7 @@ Item {
     // Vertical active workspace highlight
     StyledRect {
         id: activeHighlightV
+        parent: regularWorkspaces
         variant: "primary"
         visible: orientation === "vertical"
         z: 2
@@ -398,7 +432,7 @@ Item {
             const currentWorkspaceHasWindows = CompositorData.workspaceOccupationMap[activeWorkspaceId];
             if (workspacesWidget.radius === 0)
                 return 0;
-            return currentWorkspaceHasWindows ? workspacesWidget.radius > 0 ? Math.max(workspacesWidget.radius - parent.widgetPadding - activeWorkspaceMargin, 0) : 0 : implicitWidth / 2;
+            return currentWorkspaceHasWindows ? workspacesWidget.radius > 0 ? Math.max(workspacesWidget.radius - workspacesWidget.widgetPadding - activeWorkspaceMargin, 0) : 0 : implicitWidth / 2;
         }
 
         anchors.horizontalCenter: parent.horizontalCenter
@@ -437,6 +471,7 @@ Item {
 
     RowLayout {
         id: rowLayoutNumbers
+        parent: regularWorkspaces
         visible: orientation === "horizontal"
         z: 3
 
@@ -574,6 +609,7 @@ Item {
 
     ColumnLayout {
         id: columnLayoutNumbers
+        parent: regularWorkspaces
         visible: orientation === "vertical"
         z: 3
 
@@ -706,6 +742,43 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    StyledRect {
+        id: specialWorkspaceBadge
+        animateRadius: false
+        anchors.centerIn: parent
+        variant: "primary"
+        z: 4
+        visible: opacity > 0
+        opacity: workspacesWidget.specialBlur
+        scale: 0.8 + 0.2 * workspacesWidget.specialBlur
+        width: orientation === "vertical" ? workspaceButtonWidth
+            : Math.min(workspacesWidget.width - widgetPadding * 2,
+                specialWorkspaceText.implicitWidth + workspaceButtonWidth)
+        height: orientation === "vertical"
+            ? Math.min(workspacesWidget.height - widgetPadding * 2,
+                specialWorkspaceText.implicitWidth + workspaceButtonWidth)
+            : workspaceButtonWidth
+        radius: Math.min(width, height) / 2
+        border.width: 1
+        border.color: Colors.primary
+
+        Text {
+            id: specialWorkspaceText
+            anchors.centerIn: parent
+            width: orientation === "vertical"
+                ? specialWorkspaceBadge.height - widgetPadding * 2
+                : specialWorkspaceBadge.width - widgetPadding * 2
+            rotation: orientation === "vertical" ? -90 : 0
+            text: workspacesWidget.specialWorkspaceName
+            color: Styling.srItem("primary")
+            font.family: Config.workspaces.specialWorkspaceFont || Qt.application.font.family
+            font.weight: Qt.application.font.weight
+            font.pixelSize: Config.theme.fontSize
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
         }
     }
 }

@@ -5,5 +5,8 @@ var data = {
     "showAppIcons": true,
     "alwaysShowNumbers": false,
     "showNumbers": false,
-    "dynamic": false
+    "dynamic": false,
+    "showSpecialWorkspace": true,
+    "specialWorkspaceAnimationDuration": 100,
+    "specialWorkspaceFont": ""
 }

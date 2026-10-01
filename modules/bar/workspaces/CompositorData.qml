@@ -4,11 +4,78 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
+import "SpecialWorkspaces.js" as SpecialWorkspaces
+import qs.config
 import Quickshell.Wayland
 import qs.modules.services
 
 Singleton {
     id: root
+    property var specialWorkspaceNames: ({})
+    property bool specialRefreshPending: false
+
+    function refreshSpecialWorkspaces() {
+        if (AxctlService.compositorName !== "hyprland" || !Config.workspaces.showSpecialWorkspace) {
+            root.specialWorkspaceNames = {};
+            return;
+        }
+        if (specialMonitorProcess.running) {
+            root.specialRefreshPending = true;
+            return;
+        }
+        specialMonitorProcess.running = true;
+    }
+
+    // axctl's normalized monitor state omits specialWorkspace. Use Hyprland's
+    // monitor snapshot and refresh on its events, including empty scratchpads.
+    Process {
+        id: specialMonitorProcess
+        command: ["hyprctl", "-j", "monitors"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    root.specialWorkspaceNames = SpecialWorkspaces.namesFromMonitors(JSON.parse(text));
+                } catch (error) {
+                    root.specialWorkspaceNames = {};
+                    console.warn("Cannot read special workspaces:", error);
+                }
+            }
+        }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) root.specialWorkspaceNames = {};
+            if (root.specialRefreshPending) {
+                root.specialRefreshPending = false;
+                specialRefreshTimer.restart();
+            }
+        }
+    }
+
+    Timer {
+        id: specialRefreshTimer
+        interval: 30
+        onTriggered: root.refreshSpecialWorkspaces()
+    }
+
+    Connections {
+        target: Hyprland
+        function onRawEvent(event) {
+            if (["activespecial", "activespecialv2", "monitoradded", "monitoraddedv2",
+                 "monitorremoved", "configreloaded"].includes(event.name))
+                specialRefreshTimer.restart();
+        }
+    }
+
+    Connections {
+        target: AxctlService
+        function onCompositorNameChanged() { specialRefreshTimer.restart(); }
+    }
+
+    Connections {
+        target: Config.workspaces
+        function onShowSpecialWorkspaceChanged() { specialRefreshTimer.restart(); }
+    }
+
     property var windowList: []
     property var addresses: []
     property var windowByAddress: ({})
@@ -53,6 +120,7 @@ Singleton {
 
     Component.onCompleted: {
         updateWindowList()
+        specialRefreshTimer.restart()
     }
 
     Connections {
