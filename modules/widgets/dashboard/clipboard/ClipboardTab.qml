@@ -36,7 +36,6 @@ Item {
     property int selectedIndex: -1
     property var allItems: []
     property bool hasNavigatedFromSearch: false
-    // Set by the launcher prewarm so deferred parts load offscreen
     property bool prewarmed: false
 
     // List model
@@ -1046,11 +1045,6 @@ Item {
 
                     highlight: Item {
                         width: resultsList.width
-                        // Anchor to the live delegate position/height instead
-                        // of index arithmetic: ListModel.get() bindings don't
-                        // re-evaluate reliably after itemsModel.move() (used
-                        // by the diff-sync on deletions), which used to leave
-                        // this highlight offset from the selected row.
                         height: resultsList.currentItem ? resultsList.currentItem.height : 48
 
                         y: resultsList.currentItem ? resultsList.currentItem.y : 0
@@ -2388,8 +2382,7 @@ Item {
             vert: true
         }
 
-        // Preview panel (toda la altura, resto del ancho). Deferred so the
-        // tab instantiates fast on first open.
+        // Preview panel (toda la altura, resto del ancho)
         Loader {
             id: previewPanelLoader
             Layout.fillWidth: true

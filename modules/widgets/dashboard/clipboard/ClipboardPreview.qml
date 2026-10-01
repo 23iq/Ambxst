@@ -8,9 +8,7 @@ import qs.config
 import qs.modules.services
 import "clipboard_utils.js" as ClipboardUtils
 
-// Right-hand preview panel of the clipboard tab. Split out of
-// ClipboardTab so the tab's first instantiation stays light; the tab
-// provides state via the `tab` property (deferred Loader).
+// Right-hand preview panel of the clipboard tab; state comes from `tab`.
 Item {
     id: previewPanel
 

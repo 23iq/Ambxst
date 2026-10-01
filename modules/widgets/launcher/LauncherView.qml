@@ -27,11 +27,9 @@ Rectangle {
     property int leftPanelWidth: isCompact ? 464 : 300
     property int currentTab: GlobalStates.widgetsTabCurrentIndex  // 0=launcher, 1=clip, 2=emoji, 3=tmux, 4=notes
     property bool prefixDisabled: false  // Flag to prevent re-activation after backspace
-    // Boot-time prewarm: lets the notch load the clipboard tab offscreen
-    // so its first real open doesn't pay the QML compile cost
+    // Boot-time prewarm for the clipboard tab (offscreen)
     property bool prewarmTabs: false
-    // Sticky load flag: replaces `item !== null` in the clipboard loader's
-    // active binding (referencing item there is a binding loop)
+    // Sticky load: `item !== null` in a loader active binding loops
     property bool clipboardEverLoaded: false
 
     // Sync with GlobalStates

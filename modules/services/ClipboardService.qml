@@ -15,11 +15,8 @@ QtObject {
     property bool _initialized: false
     signal listCompleted()
 
-    // All persistence lives in the Go daemon (two encrypted SQLite
-    // stores: pinned + unpinned). The watcher is a native wlr-data-control
-    // client owned by the daemon; it emits a "clipboard.refresh" event on
-    // every clipboard change and is the selection owner for every copy,
-    // so no wl-clipboard subprocesses are involved. We just re-list.
+    // Persistence + watcher live in the Go daemon; we just re-list on
+    // its "clipboard.refresh" events.
     property int clipboardWatchHandle: -1
     property bool _watchBound: false
 
@@ -48,26 +45,22 @@ QtObject {
         BackendService.setSubscriptionActive(root.clipboardWatchHandle, true);
     }
 
-    // External trigger to start watching + load history.
-    function start() {
+        function start() {
         root.list();
     }
 
     signal fullContentRetrieved(string itemId, string content)
     signal linkPreviewFetched(string url, var metadata, string itemId)
 
-    // Function to decode URL-encoded strings
-    function decodeUriString(str) {
+        function decodeUriString(str) {
         try {
             return decodeURIComponent(str);
         } catch (e) {
-            // If decoding fails, return original string
             return str;
         }
     }
 
     function fetchLinkPreview(url, itemId) {
-        // Check cache first
         if (linkPreviewCache[url]) {
             Qt.callLater(function() {
                 root.linkPreviewFetched(url, linkPreviewCache[url], itemId);
@@ -99,7 +92,6 @@ QtObject {
                 var item = result[i];
                 var isFile = item.mime_type === "text/uri-list";
 
-                // For files, extract the filename from the URI for preview
                 var preview = item.preview;
                 if (item.is_image === 1) {
                     preview = "[Image]";
@@ -143,8 +135,6 @@ QtObject {
                 console.warn("ClipboardService: delete failed:", error || "no data");
                 return;
             }
-            // The daemon clears the live selection itself when it still
-            // holds the deleted content (exact-byte hash comparison).
             Qt.callLater(root.list);
         });
     }
@@ -179,8 +169,7 @@ QtObject {
         });
     }
 
-    // Reorder item by moving it to a new index
-    function reorderItem(itemId, newIndex) {
+        function reorderItem(itemId, newIndex) {
         if (newIndex < 0) newIndex = 0;
         BackendService.call("clipboard.reorder", {id: itemId, new_index: newIndex}, (result, error) => {
             if (error) {
@@ -191,8 +180,7 @@ QtObject {
         });
     }
 
-    // Move item up (decrease index)
-    function moveItemUp(itemId) {
+        function moveItemUp(itemId) {
         var currentIdx = -1;
         for (var i = 0; i < items.length; i++) {
             if (items[i].id === itemId) {
@@ -206,7 +194,6 @@ QtObject {
         var prevItem = items[currentIdx - 1];
         if (prevItem.pinned !== item.pinned) return;
 
-        // Optimistic update: swap in local array
         var temp = items[currentIdx];
         items[currentIdx] = items[currentIdx - 1];
         items[currentIdx - 1] = temp;
@@ -215,8 +202,7 @@ QtObject {
         swapItems(itemId, prevItem.id);
     }
 
-    // Move item down (increase index)
-    function moveItemDown(itemId) {
+        function moveItemDown(itemId) {
         var currentIdx = -1;
         for (var i = 0; i < items.length; i++) {
             if (items[i].id === itemId) {
@@ -239,8 +225,7 @@ QtObject {
         swapItems(itemId, nextItem.id);
     }
 
-    // Swap display indices between two items
-    function swapItems(itemId1, itemId2) {
+        function swapItems(itemId1, itemId2) {
         BackendService.call("clipboard.swap", {id1: itemId1, id2: itemId2}, (result, error) => {
             if (error) {
                 console.warn("ClipboardService: swap failed:", error);
@@ -250,9 +235,7 @@ QtObject {
         });
     }
 
-    // Copy an item back to the clipboard (text, file URI or image blob).
-    // The daemon becomes the selection owner and records the copy itself,
-    // so no follow-up "check" pass is needed.
+// Copy an item back to the clipboard (the daemon records the copy).
     function copyItem(id, mime) {
         BackendService.call("clipboard.copy", {id: id, mime: mime || ""}, (result, error) => {
             if (error) {
@@ -261,10 +244,8 @@ QtObject {
         });
     }
 
-    // Load image data as data URL (images live as encrypted blobs now).
-    // Caches are keyed by "id|hash": rowids alone are not stable enough
-    // across stores, and the hash guarantees a recycled id can never
-    // serve a previous item's image.
+    // Caches keyed by "id|hash": a recycled rowid can never serve a
+    // previous item's image.
     function decodeToDataUrl(id, mime, hash) {
         var key = cacheKey(id, hash);
         if (imageDataById[key]) {
@@ -283,8 +264,7 @@ QtObject {
         return imageDataById[cacheKey(id, hash)] || "";
     }
 
-    // Materialize an image blob to a tmpfs path (drag-and-drop / open).
-    function requestImagePath(id, hash) {
+        function requestImagePath(id, hash) {
         var key = cacheKey(id, hash);
         if (imagePathById[key]) {
             return;
@@ -306,8 +286,7 @@ QtObject {
         return id + "|" + (hash || "");
     }
 
-    // Purge cache entries whose item no longer exists in the history.
-    function pruneImageCaches() {
+        function pruneImageCaches() {
         var live = {};
         for (var i = 0; i < items.length; i++) {
             live[cacheKey(items[i].id, items[i].hash)] = true;
@@ -330,8 +309,7 @@ QtObject {
         }
     }
 
-    // Copy and paste emoji via Ctrl+V (the daemon waits for selection
-    // ownership before typing, so a stale clipboard is never pasted)
+// Copy and paste emoji via Ctrl+V (daemon waits for selection ownership).
     function copyAndTypeEmoji(emojiText) {
         BackendService.call("clipboard.emojiType", {emoji: emojiText}, (result, error) => {
             if (error) {
@@ -341,7 +319,6 @@ QtObject {
     }
 
     Component.onCompleted: {
-        // Bind clipboard watcher at boot (cheap - just adds IPC subscription)
         bindWatcher();
     }
 }

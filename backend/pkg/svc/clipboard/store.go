@@ -24,19 +24,13 @@ import (
 	"ambxst/backend/pkg/paths"
 )
 
-// maxUnpinnedItems caps the unpinned history (pinned items are exempt).
 const maxUnpinnedItems = 50
 
-// vacuumThresholdPages is the free-page count above which a store is
-// worth rewriting: deleted image blobs accumulate fast and the bloated
-// file slows every subsequent operation.
+// vacuumThresholdPages: free-page count above which VacuumIfBloated rewrites.
 const vacuumThresholdPages = 1024
 
-// schemaSQL creates the item table + FTS5 index + sync triggers. Both
-// stores share it; the pinned column is kept for parity (always 1 in the
-// pinned store, 0 in the unpinned one) so reindex SQL stays uniform.
-// AUTOINCREMENT keeps ids stable across delete/insert cycles so QML-side
-// per-id caches can never alias a new item onto a deleted rowid.
+// schemaSQL: item table + FTS5 index + sync triggers, shared by both
+// stores. AUTOINCREMENT keeps ids stable across delete/insert cycles.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS clipboard_items (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +59,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
 );
 ` + schemaTriggersSQL
 
-// schemaTriggersSQL keeps the FTS index in sync with clipboard_items.
 const schemaTriggersSQL = `
 CREATE TRIGGER IF NOT EXISTS clipboard_items_ai AFTER INSERT ON clipboard_items BEGIN
 	INSERT INTO clipboard_fts(rowid, preview, full_content)
@@ -83,7 +76,6 @@ CREATE TRIGGER IF NOT EXISTS clipboard_items_au AFTER UPDATE ON clipboard_items 
 END;
 `
 
-// itemID identifies an item across both stores: "p:12" (pinned) or "u:7".
 type itemID struct {
 	pinned bool
 	id     int64
@@ -131,7 +123,6 @@ func scanInt(s string, out *int64) bool {
 	return true
 }
 
-// itemRow is a full clipboard row, used when moving rows between stores.
 type itemRow struct {
 	hash, mime, alias string
 	preview, content  []byte
@@ -141,9 +132,7 @@ type itemRow struct {
 	mimes             string
 }
 
-// store owns the two encrypted SQLite databases (pinned + unpinned) and
-// serializes every access through one mutex. Encrypted stores use the
-// adiantum VFS (pure Go, no cgo) with a per-installation key.
+// store owns the two encrypted SQLite databases (pinned + unpinned).
 type store struct {
 	paths    *paths.Paths
 	hexKey   string
@@ -163,14 +152,11 @@ func newStore(p *paths.Paths) (*store, error) {
 		return nil, err
 	}
 	if err := s.migrateLegacy(); err != nil {
-		// The daemon must not stall or die over a bad legacy DB.
 		log.Printf("[clipboard] legacy migration: %v", err)
 	}
 	return s, nil
 }
 
-// loadOrCreateKey reads the hex key file, creating a random 32-byte key
-// (0600) on first use.
 func loadOrCreateKey(path string) (string, error) {
 	if data, err := os.ReadFile(path); err == nil {
 		key := strings.TrimSpace(string(data))
@@ -192,7 +178,6 @@ func loadOrCreateKey(path string) (string, error) {
 	return key, nil
 }
 
-// openDB opens an encrypted database, registering FTS5 on every connection.
 func openDB(path, hexKey string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
@@ -222,10 +207,7 @@ func openDB(path, hexKey string) (*sql.DB, error) {
 	return db, nil
 }
 
-// migrateSchema upgrades databases created before the mimes column and
-// AUTOINCREMENT ids. The upgrade rebuilds the table in place (dropping
-// and recreating the FTS triggers, which follow the renamed table) and
-// rebuilds the FTS index against the new rowids.
+// migrateSchema upgrades pre-mimes/AUTOINCREMENT databases by rebuilding the table.
 func migrateSchema(db *sql.DB) error {
 	var createSQL string
 	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'clipboard_items';`).Scan(&createSQL); err != nil {
@@ -285,8 +267,7 @@ SELECT id, content_hash, mime_type, preview, full_content, is_image, size, pinne
 	return err
 }
 
-// openDatabases opens (or reopens) both stores. The unpinned store lives
-// in tmpfs when tmpMode is on.
+// openDatabases opens (or reopens) both stores.
 func (s *store) openDatabases(tmpMode bool) error {
 	pinned, err := openDB(s.paths.ClipboardPinnedDB(), s.hexKey)
 	if err != nil {
@@ -333,9 +314,7 @@ func (s *store) dbFor(id itemID) *sql.DB {
 	return s.unpinned
 }
 
-// setTmpMode switches the unpinned store location. Activating moves the
-// local unpinned history into tmpfs; deactivating discards the tmpfs
-// store (it dies on reboot anyway) and unpinned history starts fresh.
+// setTmpMode moves the unpinned store to/from tmpfs.
 func (s *store) setTmpMode(enabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -352,8 +331,7 @@ func (s *store) setTmpMode(enabled bool) error {
 	return s.openDatabases(enabled)
 }
 
-// moveRowsTo copies every row of src into the store at dstPath (existing
-// rows win) and empties src.
+// moveRowsTo copies every src row into dstPath and empties src.
 func (s *store) moveRowsTo(src *sql.DB, dstPath string) error {
 	dst, err := openDB(dstPath, s.hexKey)
 	if err != nil {
@@ -385,7 +363,6 @@ func (s *store) moveRowsTo(src *sql.DB, dstPath string) error {
 	return err
 }
 
-// readTmpfsFlag reads the clipboard.tmpfs key from the QML system config.
 func readTmpfsFlag(p *paths.Paths) bool {
 	data, err := os.ReadFile(p.Config("system"))
 	if err != nil {
@@ -402,13 +379,8 @@ func readTmpfsFlag(p *paths.Paths) bool {
 	return doc.Clipboard.Tmpfs
 }
 
-// migrateLegacy imports the plaintext clipboard.db (text inline, images as
-// files under clipboard-data/) into the encrypted stores, then removes the
-// legacy artifacts.
-// migrateLegacy imports ONLY pinned items from the plaintext clipboard.db
-// (images folded in as blobs) into the encrypted pinned store, then
-// removes the legacy artifacts. Unpinned history is discarded by design:
-// importing the full history (with its image files) stalled daemon boot.
+// migrateLegacy imports ONLY pinned items from the plaintext legacy db
+// (unpinned history is discarded; importing everything stalled boot).
 func (s *store) migrateLegacy() error {
 	legacyPath := s.paths.ClipboardDB()
 	if _, err := os.Stat(legacyPath); err != nil {
@@ -438,7 +410,6 @@ func (s *store) migrateLegacy() error {
 		if err := rows.Scan(&mime, &preview, &content, &isImage, &binaryPath, &hash, &size, &displayIndex, &alias, &createdAt, &updatedAt); err != nil {
 			return err
 		}
-		// Images lived as plain files; fold them into the row as a blob.
 		if isImage == 1 && binaryPath.String != "" {
 			if data, err := os.ReadFile(binaryPath.String); err == nil {
 				content = data
@@ -467,7 +438,6 @@ ON CONFLICT(content_hash) DO NOTHING;`,
 	return nil
 }
 
-// fileURI builds a plain file: URI (no VFS override) for the legacy DB.
 func fileURI(path string) string {
 	u := url.URL{Scheme: "file", Path: path}
 	return u.String()
@@ -480,10 +450,7 @@ func nullableString(s string) any {
 	return s
 }
 
-// --- item operations (all take the store mutex) ---
-
-// listItems returns the merged history: pinned first (by display_index),
-// then unpinned. IDs are namespaced by store.
+// listItems: pinned first, then unpinned; ids namespaced "p:N"/"u:N".
 func (s *store) listItems() []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -540,7 +507,6 @@ func (s *store) listItems() []map[string]any {
 	return items
 }
 
-// getContent returns the full text content of an item.
 func (s *store) getContent(id itemID) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -556,8 +522,7 @@ func (s *store) getContent(id itemID) (string, error) {
 	return string(content), err
 }
 
-// deleteItem removes an item and returns its hash (so the caller can
-// clear the live clipboard if it matches).
+// deleteItem removes an item and returns its hash.
 func (s *store) deleteItem(id itemID) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -573,7 +538,6 @@ func (s *store) deleteItem(id itemID) (string, error) {
 	return hash, nil
 }
 
-// clearUnpinned drops the whole unpinned history (pinned items survive).
 func (s *store) clearUnpinned() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -584,8 +548,7 @@ func (s *store) clearUnpinned() error {
 	return err
 }
 
-// togglePin moves an item between the stores, placing it at the top of
-// its new group (mirrors the legacy display_index behaviour).
+// togglePin moves an item between the stores, at the top of its new group.
 func (s *store) togglePin(id itemID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -706,7 +669,6 @@ func (s *store) reorder(id itemID, newIndex int) error {
 	return tx.Commit()
 }
 
-// swap exchanges the display_index of two items (must share a store).
 func (s *store) swap(id1, id2 itemID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -750,11 +712,8 @@ UPDATE clipboard_items SET display_index = (SELECT new_idx FROM ranked WHERE ran
 	return err
 }
 
-// insertUnpinned stores new clipboard content in the unpinned history
-// (deduplicating by hash, bumping repeats to the top) and prunes the
-// history beyond maxUnpinnedItems. Content that already exists in the
-// pinned store is not duplicated across stores. Returns whether the
-// unpinned store changed.
+// insertUnpinned upserts by hash (bumping repeats to the top), skips
+// content already pinned, and prunes beyond maxUnpinnedItems.
 func (s *store) insertUnpinned(mime string, mimes []string, content []byte, isImage bool, size int64) (bool, error) {
 	if !isImage && len(content) == 0 {
 		return false, nil
@@ -802,9 +761,7 @@ ON CONFLICT(content_hash) DO UPDATE SET updated_at = excluded.updated_at, displa
 	return true, nil
 }
 
-// vacuum reclaims free pages left behind by the history churn (large
-// deleted image blobs accumulate fast otherwise). Holds the store mutex
-// for the duration; run it off the hot path.
+// vacuum reclaims free pages; blocks the store, run off the hot path.
 func (s *store) vacuum() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -821,7 +778,6 @@ func (s *store) vacuum() error {
 	return nil
 }
 
-// freelistCounts reports free pages per store (0 when closed).
 func (s *store) freelistCounts() (int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -836,8 +792,7 @@ func (s *store) freelistCounts() (int, int) {
 	return count(s.pinned), count(s.unpinned)
 }
 
-// VacuumIfBloated rewrites the stores in the background when either has
-// accumulated too many free pages.
+// VacuumIfBloated rewrites the stores when either has too many free pages.
 func (s *store) VacuumIfBloated() {
 	pinned, unpinned := s.freelistCounts()
 	if pinned < vacuumThresholdPages && unpinned < vacuumThresholdPages {
@@ -869,7 +824,6 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// copyRow returns the mime + raw content of any item (text or image).
 func (s *store) copyRow(id itemID) (string, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -886,7 +840,6 @@ func (s *store) copyRow(id itemID) (string, []byte, error) {
 	return mime, content, err
 }
 
-// imageBlob returns the raw bytes + mime of an image item.
 func (s *store) imageBlob(id itemID) ([]byte, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -902,4 +855,3 @@ func (s *store) imageBlob(id itemID) ([]byte, string, error) {
 	}
 	return blob, mime, err
 }
-

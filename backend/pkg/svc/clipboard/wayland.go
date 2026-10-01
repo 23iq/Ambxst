@@ -25,31 +25,21 @@ const (
 	emojiConfirmMax = 800 * time.Millisecond
 )
 
-// wlClient owns a persistent wlr-data-control connection. It watches the
-// clipboard selection natively (no wl-paste/wl-copy subprocesses) and
-// serves stored content back as the selection owner, so every copy the
-// shell performs is known to the daemon — no polling races.
-//
-// Threading: events are dispatched on the run() goroutine; request writes
-// come from both the event loop and IPC handler goroutines and are
-// serialized with writeMu. Captures read their pipe synchronously on the
-// event loop (with a deadline) so selection order is preserved.
+// wlClient owns a persistent wlr-data-control connection: it watches the
+// clipboard selection and serves copies as the selection owner.
 type wlClient struct {
 	svc *Service
 
 	writeMu sync.Mutex
 
-	mu          sync.Mutex
-	selOffer    *wlr_data_control.ZwlrDataControlOfferV1
-	selMimes    []string
-	primOffer   *wlr_data_control.ZwlrDataControlOfferV1
-	pendOffer   *wlr_data_control.ZwlrDataControlOfferV1
-	pendMimes   []string
-	liveHash    string
-	confirmCh   chan struct{}
-	source      *wlr_data_control.ZwlrDataControlSourceV1
-	sourceMimes []string
-	sourceData  []byte
+	mu        sync.Mutex
+	selOffer  *wlr_data_control.ZwlrDataControlOfferV1
+	selMimes  []string
+	primOffer *wlr_data_control.ZwlrDataControlOfferV1
+	pendMimes []string
+	liveHash  string
+	confirmCh chan struct{}
+	source    *wlr_data_control.ZwlrDataControlSourceV1
 
 	display *wlclient.Display
 	ctx     *wlclient.Context
@@ -62,9 +52,8 @@ type wlClient struct {
 	doneCh chan struct{}
 }
 
-// startWayland connects and binds the data-control globals. It returns
-// errNoDataControl (permanent) when the compositor lacks the protocol or
-// Wayland is unreachable; the clipboard feature is then disabled.
+// startWayland returns errNoDataControl when the compositor lacks the
+// protocol; the clipboard feature is then disabled.
 func startWayland(svc *Service) (*wlClient, error) {
 	w := &wlClient{svc: svc, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 	if err := w.connect(); err != nil {
@@ -76,8 +65,6 @@ func startWayland(svc *Service) (*wlClient, error) {
 
 var errNoDataControl = errors.New("wlr-data-control not available")
 
-// connect performs one full connection setup. Permanent failures (no
-// Wayland env, protocol missing) return errNoDataControl.
 func (w *wlClient) connect() error {
 	display, err := wlclient.Connect("")
 	if err != nil {
@@ -95,7 +82,6 @@ func (w *wlClient) connect() error {
 
 	var manager *wlr_data_control.ZwlrDataControlManagerV1
 	var seat *wlclient.Seat
-	var seatName uint32
 
 	registry.SetGlobalHandler(func(ev wlclient.RegistryGlobalEvent) {
 		switch ev.Interface {
@@ -114,7 +100,6 @@ func (w *wlClient) connect() error {
 			st := wlclient.NewSeat(w.ctx)
 			if err := registry.Bind(ev.Name, ev.Interface, min(ev.Version, 1), st); err == nil {
 				seat = st
-				seatName = ev.Name
 			}
 		}
 	})
@@ -147,7 +132,6 @@ func (w *wlClient) connect() error {
 			return
 		}
 		w.pendMimes = nil
-		w.pendOffer = ev.Id
 		ev.Id.SetOfferHandler(func(oe wlr_data_control.ZwlrDataControlOfferV1OfferEvent) {
 			w.pendMimes = append(w.pendMimes, oe.MimeType)
 		})
@@ -169,7 +153,6 @@ func (w *wlClient) connect() error {
 		w.teardown()
 		return err
 	}
-	_ = seatName
 	return nil
 }
 
@@ -232,7 +215,6 @@ func (w *wlClient) run() {
 			if err := w.connect(); err == nil {
 				break
 			} else if errors.Is(err, errNoDataControl) {
-				// Compositor went away entirely; keep retrying quietly.
 				log.Printf("[clipboard] reconnect: %v", err)
 			}
 			select {
@@ -291,15 +273,14 @@ func (w *wlClient) stop() {
 	}
 }
 
-// write serializes a request write (callable from any goroutine).
 func (w *wlClient) write(fn func() error) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 	return fn()
 }
 
-// handleSelection runs on the event loop. isPrimary offers are tracked
-// only for lifecycle cleanup; capture covers the clipboard selection.
+// handleSelection runs on the event loop; primary offers are tracked only
+// for lifecycle cleanup.
 func (w *wlClient) handleSelection(offer *wlr_data_control.ZwlrDataControlOfferV1, isPrimary bool) {
 	if isPrimary {
 		if w.primOffer != nil && w.primOffer != offer {
@@ -324,11 +305,11 @@ func (w *wlClient) handleSelection(offer *wlr_data_control.ZwlrDataControlOfferV
 	}
 
 	if offer == nil {
-		w.setLiveHash("")
 		w.mu.Lock()
 		w.selOffer = nil
 		w.selMimes = nil
 		w.mu.Unlock()
+		w.setLiveHash("")
 		return
 	}
 
@@ -337,11 +318,9 @@ func (w *wlClient) handleSelection(offer *wlr_data_control.ZwlrDataControlOfferV
 	w.capture(offer, mimes)
 }
 
-// capture reads the offered content for the highest-priority usable mime
-// and upserts it into the history. The pipe read happens on its own
-// goroutine: the source client's `send` event can only be dispatched by
-// the event loop, so blocking here would deadlock the transfer. Capture
-// ordering is preserved by only applying the most recently issued capture.
+// capture reads the offered content. The pipe read must not block the
+// event loop: the source's send event can only be dispatched there, so
+// blocking would deadlock the transfer.
 func (w *wlClient) capture(offer *wlr_data_control.ZwlrDataControlOfferV1, mimes []string) {
 	mime := pickCaptureMime(mimes)
 	if mime == "" {
@@ -381,11 +360,8 @@ func (w *wlClient) capture(offer *wlr_data_control.ZwlrDataControlOfferV1, mimes
 			content = bytes.ReplaceAll(content, []byte("\r"), nil)
 		}
 
-		hash := md5Hash(content)
-		w.setLiveHash(hash)
+		w.setLiveHash(md5Hash(content))
 
-		// Always upsert: a repeat copy must bump the item to the top
-		// (the store dedups by hash; identical content just reorders).
 		isImage := strings.HasPrefix(mime, "image/")
 		if w.svc.captureContent(mime, mimes, content, isImage, int64(len(content))) {
 			w.svc.Send("clipboard.refresh", map[string]any{"ok": true})
@@ -393,9 +369,7 @@ func (w *wlClient) capture(offer *wlr_data_control.ZwlrDataControlOfferV1, mimes
 	}()
 }
 
-// copyContent becomes the selection owner for the given content. Returns
-// after the compositor has accepted the request (not after the paste
-// target consumed it — ownership is authoritative).
+// copyContent makes the daemon the selection owner for the given content.
 func (w *wlClient) copyContent(mime string, content []byte) error {
 	if len(content) == 0 {
 		return errors.New("empty content")
@@ -416,7 +390,6 @@ func (w *wlClient) copyContent(mime string, content []byte) error {
 			w.write(func() error {
 				if w.source == source {
 					w.source = nil
-					w.sourceData = nil
 				}
 				return source.Destroy()
 			})
@@ -430,15 +403,12 @@ func (w *wlClient) copyContent(mime string, content []byte) error {
 			return err
 		}
 		w.source = source
-		w.sourceMimes = []string{mime}
-		w.sourceData = content
 		return nil
 	})
 }
 
-// copyTextAwait sets the selection and waits until the compositor echoes
-// the new selection back (or the timeout expires). Used before typing a
-// paste keystroke so the target never reads a stale selection.
+// copyTextAwait waits for the compositor to echo the selection back (or
+// the timeout), so a paste keystroke never reads a stale selection.
 func (w *wlClient) copyTextAwait(mime string, content []byte) bool {
 	confirm := make(chan struct{}, 1)
 	w.mu.Lock()
@@ -464,10 +434,8 @@ func (w *wlClient) copyTextAwait(mime string, content []byte) bool {
 	}
 }
 
-// clearSelection unsets the clipboard selection (the active source, if
-// any, receives a cancelled event and cleans itself up). Some compositors
-// don't echo a NULL selection event, so track the cleared state here —
-// otherwise re-copying the same content would be skipped as unchanged.
+// clearSelection: some compositors don't echo a NULL selection, so the
+// hash must be reset here or re-copies get skipped as unchanged.
 func (w *wlClient) clearSelection() {
 	w.write(func() error { return w.device.SetSelection(nil) })
 	w.setLiveHash("")
@@ -485,16 +453,13 @@ func (w *wlClient) liveHashValue() string {
 	return w.liveHash
 }
 
-// liveMimes returns the mime list of the current clipboard selection.
 func (w *wlClient) liveMimes() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return append([]string(nil), w.selMimes...)
 }
 
-// liveContent reads the requested mime from the current selection offer
-// (the wl-paste equivalent, in-process). Called from IPC goroutines; the
-// pipe read is bounded by the same deadline as captures.
+// liveContent reads the requested mime from the current selection offer.
 func (w *wlClient) liveContent(mime string) ([]byte, error) {
 	w.mu.Lock()
 	offer := w.selOffer
@@ -526,7 +491,6 @@ func (w *wlClient) liveContent(mime string) ([]byte, error) {
 	return content, nil
 }
 
-// serveData writes content to a paste target's fd and closes it.
 func serveData(fd int, content []byte) {
 	f := os.NewFile(uintptr(fd), "clipboard-send")
 	if f == nil {
@@ -538,7 +502,6 @@ func serveData(fd int, content []byte) {
 	}
 }
 
-// readAllCapped reads until EOF, error or the size cap.
 func readAllCapped(f *os.File, cap int64) ([]byte, error) {
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(io.LimitReader(f, cap+1)); err != nil {
@@ -555,8 +518,7 @@ func md5Hash(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pickCaptureMime chooses which offered mime to store, mirroring the
-// legacy priority: files, then images, then plain text (UTF-8 first).
+// pickCaptureMime: uri-list, then images, then plain text (UTF-8 first).
 func pickCaptureMime(mimes []string) string {
 	var imageMime string
 	for _, m := range mimes {
@@ -581,4 +543,3 @@ func pickCaptureMime(mimes []string) string {
 	}
 	return ""
 }
-
