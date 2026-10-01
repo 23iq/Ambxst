@@ -1096,7 +1096,6 @@ Rectangle {
         Loader {
             id: clipboardLoader
             active: currentTab === 1 || root.clipboardEverLoaded || root.prewarmTabs
-            onLoaded: root.clipboardEverLoaded = true
             sourceComponent: Component {
                 ClipboardTab {
                     leftPanelWidth: root.leftPanelWidth
@@ -1114,6 +1113,7 @@ Rectangle {
                 }
             }
             onLoaded: {
+                root.clipboardEverLoaded = true;
                 if (currentTab === 1 && item && item.focusSearchInput) {
                     root.focusSearchInput();
                 }
