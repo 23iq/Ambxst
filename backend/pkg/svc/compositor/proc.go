@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,9 +100,58 @@ func (m *Manager) Start() error {
 	return nil
 }
 
+// hyprlandChildEnv returns the environment for axctl children with a
+// corrected HYPRLAND_INSTANCE_SIGNATURE when the inherited one points to
+// a dead Hyprland session. Stale signatures are commonly inherited from
+// tmux servers or terminals that survived a compositor restart, leaving
+// axctl (and therefore the shell) silently blind to window state.
+// Auto-heal only when the current signature is provably dead and exactly
+// one live instance answers.
+func hyprlandChildEnv() []string {
+	env := os.Environ()
+	sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE")
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if sig == "" || runtimeDir == "" {
+		return env
+	}
+	sock := filepath.Join(runtimeDir, "hypr", sig, ".socket.sock")
+	if socketAlive(sock) {
+		return env
+	}
+	matches, _ := filepath.Glob(filepath.Join(runtimeDir, "hypr", "*", ".socket.sock"))
+	var live []string
+	for _, m := range matches {
+		if socketAlive(m) {
+			live = append(live, m)
+		}
+	}
+	if len(live) != 1 {
+		return env
+	}
+	liveSig := filepath.Base(filepath.Dir(live[0]))
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "HYPRLAND_INSTANCE_SIGNATURE=") {
+			env[i] = "HYPRLAND_INSTANCE_SIGNATURE=" + liveSig
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[compositor] inherited HYPRLAND_INSTANCE_SIGNATURE is dead; using live session %s\n", liveSig)
+	return env
+}
+
+// socketAlive reports whether a unix socket path has a listening peer.
+func socketAlive(path string) bool {
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 func (m *Manager) startDaemon() error {
 	cmd := exec.Command("axctl", "-c", m.tomlPath, "daemon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = hyprlandChildEnv()
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
@@ -210,6 +260,7 @@ func (m *Manager) subscribeLoop() {
 
 		cmd := exec.Command("axctl", "subscribe")
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Env = hyprlandChildEnv()
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			time.Sleep(subscribeRetryDelay)
@@ -321,6 +372,7 @@ func (m *Manager) Dispatch(args []string) (string, int, error) {
 		return "", 0, fmt.Errorf("dispatch: empty args")
 	}
 	cmd := exec.Command("axctl", args...)
+	cmd.Env = hyprlandChildEnv()
 	out, err := cmd.CombinedOutput()
 	exit := 0
 	if err != nil {
