@@ -720,13 +720,14 @@ Singleton {
                 if (done)
                     return;
                 done = true;
+                const tmpPath = root.cacheTmpPath();
                 grabToImage(result => {
-                    if (!result || !result.image || !result.saveToFile(root.cacheTmpPath())) {
+                    if (!result || !result.image || !result.saveToFile(tmpPath)) {
                         console.warn("Notifications: grabToImage failed for", job.imageUrl);
                         finish(null);
                         return;
                     }
-                    finish(root.cacheTmpPath());
+                    finish(tmpPath);
                 });
             }
 
