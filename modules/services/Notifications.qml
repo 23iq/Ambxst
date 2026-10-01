@@ -550,8 +550,8 @@ Singleton {
     //   - data: URIs        → passed straight to the daemon
     //   - image:// URLs     → Quickshell's in-process image provider
     //     (raw image_data D-Bus hints land here). The daemon can't
-    //     resolve these, so we re-encode to a PNG data URI via Canvas
-    //     and let the daemon persist it as a blob.
+    //     resolve these, so we render + grab to a temp file and let the
+    //     daemon persist it as a blob.
     //   - http(s) / file:// / local paths → sent to the daemon as-is
     function cacheImage(imageUrl, callback) {
         if (!imageUrl || imageUrl.startsWith("data:")) {
@@ -560,7 +560,20 @@ Singleton {
         }
 
         if (imageUrl.startsWith("image://")) {
-            cacheProviderImage(imageUrl, callback);
+            cacheProviderImage(imageUrl, function (tmpPath) {
+                if (!tmpPath) {
+                    callback(imageUrl);
+                    return;
+                }
+                BackendService.call("notify.cacheImage", {url: tmpPath}, function (result, error) {
+                    if (!result?.path) {
+                        callback(imageUrl);
+                        return;
+                    }
+                    const path = result.path.startsWith("/") ? "file://" + result.path : result.path;
+                    callback(path);
+                });
+            });
             return;
         }
 
@@ -598,8 +611,14 @@ Singleton {
     // hints) can only be resolved by rendering them inside a scene, and
     // this singleton has none. A small transparent layer surface hosts the
     // render jobs; it reserves no exclusive zone and accepts no input.
+    //
+    // The scene only produces frames while the frame-pump animation runs,
+    // which is required for grabToImage to capture actual pixels. Canvas
+    // drawImage is not an alternative: it rasterizes provider images blank.
 
     property var cacheWindow: null
+    property int activeCacheJobs: 0
+    property int cacheJobCounter: 0
 
     Component {
         id: cacheWindowComponent
@@ -619,42 +638,69 @@ Singleton {
                 left: true
             }
             WlrLayershell.namespace: "ambxst:notification-cache"
+
+            Rectangle {
+                width: 1
+                height: 1
+                color: "transparent"
+                visible: root.activeCacheJobs > 0
+                SequentialAnimation on opacity {
+                    loops: Animation.Infinite
+                    NumberAnimation {
+                        to: 0
+                        duration: 16
+                    }
+                    NumberAnimation {
+                        to: 1
+                        duration: 16
+                    }
+                    running: root.activeCacheJobs > 0
+                }
+            }
         }
     }
 
     Component {
         id: imageCacheJob
 
-        Canvas {
+        Item {
             id: job
 
             required property string imageUrl
             required property var callback
             readonly property int maxSize: 512
-            property bool painted: false
             property bool done: false
 
-            renderTarget: Canvas.Image
-            renderStrategy: Canvas.Immediate
             width: 1
             height: 1
 
-            property Image sourceImage: Image {
+            Component.onCompleted: root.activeCacheJobs++
+            Component.onDestruction: root.activeCacheJobs--
+
+            Image {
+                id: img
+                anchors.fill: parent
                 source: job.imageUrl
                 asynchronous: true
                 cache: false
 
                 onStatusChanged: {
                     if (status === Image.Ready)
-                        job.setupCanvas();
+                        job.setup();
                     else if (status === Image.Error)
                         job.finish(null);
                 }
             }
 
-            function setupCanvas() {
-                const iw = sourceImage.implicitWidth;
-                const ih = sourceImage.implicitHeight;
+            Timer {
+                id: settleTimer
+                interval: 150
+                onTriggered: job.grab()
+            }
+
+            function setup() {
+                const iw = img.implicitWidth;
+                const ih = img.implicitHeight;
                 if (iw <= 0 || ih <= 0) {
                     finish(null);
                     return;
@@ -662,34 +708,36 @@ Singleton {
                 const scale = Math.min(1, maxSize / Math.max(iw, ih));
                 width = Math.max(1, Math.round(iw * scale));
                 height = Math.max(1, Math.round(ih * scale));
-                requestPaint();
+                img.width = width;
+                img.height = height;
+                // Let the scene render the image texture before grabbing.
+                settleTimer.restart();
             }
 
-            onPaint: {
-                const ctx = getContext("2d");
-                ctx.clearRect(0, 0, width, height);
-                ctx.drawImage(sourceImage, 0, 0, width, height);
-                painted = true;
-            }
-
-            onPainted: {
-                if (!painted || done)
+            function grab() {
+                if (done)
                     return;
                 done = true;
-                try {
-                    finish(toDataURL("image/png"));
-                } catch (e) {
-                    finish(null);
-                }
+                grabToImage(result => {
+                    if (!result || !result.image || !result.saveToFile(root.cacheTmpPath())) {
+                        finish(null);
+                        return;
+                    }
+                    finish(root.cacheTmpPath());
+                });
             }
 
             function finish(result) {
                 const cb = callback;
                 destroy();
                 if (cb)
-                    cb(result ? result : imageUrl);
+                    cb(result);
             }
         }
+    }
+
+    function cacheTmpPath() {
+        return "/tmp/ambxst-notif-cache-" + root.cacheJobCounter++ + ".png";
     }
 
     function cacheProviderImage(imageUrl, callback) {
