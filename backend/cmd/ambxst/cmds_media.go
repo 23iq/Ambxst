@@ -116,7 +116,7 @@ func generateThumb(filePath, thumbPath string, size int) error {
 	}
 	ext := strings.ToLower(filepath.Ext(filePath))
 	if mediaVideoExts[ext] {
-		scale := fmt.Sprintf("%d:%d:force_original_aspect_ratio=increase,crop=%d:%d", size, size, size, size)
+		scale := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d", size, size, size, size)
 		_, err := exec.Command("ffmpeg", "-y", "-i", filePath,
 			"-ss", "00:00:01", "-vframes", "1", "-vf", scale, "-q:v", "2", "-f", "image2", thumbPath).Output()
 		return err

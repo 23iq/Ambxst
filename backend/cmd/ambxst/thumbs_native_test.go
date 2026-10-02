@@ -6,9 +6,41 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func TestGenerateThumbVideo(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is required for video thumbnail generation")
+	}
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "video.mp4")
+	cmd := exec.Command(ffmpeg, "-y", "-f", "lavfi", "-i",
+		"testsrc2=size=160x90:rate=2", "-t", "2", "-c:v", "mpeg4", srcPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create test video: %v\n%s", err, output)
+	}
+	thumbPath := filepath.Join(dir, "thumbnails", "video.mp4.jpg")
+	if err := generateThumb(srcPath, thumbPath, 64); err != nil {
+		t.Fatalf("generateThumb video: %v", err)
+	}
+	f, err := os.Open(thumbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	decoded, err := jpeg.Decode(f)
+	if err != nil {
+		t.Fatalf("video thumb not valid JPEG: %v", err)
+	}
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 64 || bounds.Dy() != 64 {
+		t.Fatalf("expected 64x64 video thumb, got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+}
 
 func TestScaleCenterCrop(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 400, 200))
