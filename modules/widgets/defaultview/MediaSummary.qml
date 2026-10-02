@@ -12,6 +12,7 @@ Item {
     required property var player
     property bool mediaExpanded: false
     readonly property bool selectorOpen: selector.isOpen
+    readonly property bool selectorHovered: badgeHover.hovered
 
     AlbumBackdrop {
         anchors.fill: parent

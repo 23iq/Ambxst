@@ -61,6 +61,12 @@ Item {
         id: dragManager
         anchors.fill: root
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+        cursorShape: Qt.PointingHandCursor
+        onClicked: mouse => {
+            if (mouse.button === Qt.LeftButton && root.latestNotification) {
+                Notifications.activateNotification(root.latestNotification.id);
+            }
+        }
 
         onPressed: mouse => {
             if (mouse.button === Qt.MiddleButton) {

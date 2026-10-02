@@ -6,7 +6,10 @@ import os, pathlib, tempfile, shutil
 os.environ['QT_QPA_PLATFORM']='offscreen'
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlEngine, QQmlComponent
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QPoint, QPointF, Qt
+from PySide6.QtQuick import QQuickWindow, QQuickItem
+from PySide6.QtTest import QTest
+from PySide6.QtQml import QQmlExpression
 app=QGuiApplication([])
 repo=pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='ambxst-components-') as tmp:
@@ -80,3 +83,58 @@ Item { property bool isNavigating: false; property bool notchHovered: false; imp
   for e in c.errors(): print(e.toString())
   failed = failed or obj is None
  if failed: raise SystemExit(1)
+
+ c=QQmlComponent(engine,QUrl.fromLocalFile(str(children/'DefaultView.qml')))
+ view=c.create()
+ def evaluate(obj, expression):
+  e=QQmlExpression(engine.contextForObject(obj), obj, expression)
+  result=e.evaluate()
+  assert not e.hasError(), e.error().toString()
+  return result[0] if isinstance(result, tuple) else result
+ evaluate(view, 'MprisController.activePlayer = ({trackTitle: "Song", identity: "Player"})')
+ evaluate(view, 'Notifications.popupList = [{id: 1}]')
+ window=QQuickWindow(); window.resize(700, 500)
+ view.setParentItem(window.contentItem()); view.setX(100); view.setY(100)
+ window.show(); QTest.qWait(40)
+ def move(item):
+  point=item.mapToScene(item.boundingRect().center()).toPoint()
+  QTest.mouseMove(window, point); QTest.qWait(350)
+ header=evaluate(view, 'header')
+ summary=next(i for i in header.childItems() if 'Loader' in i.metaObject().className())
+ def move_badge():
+  point=summary.mapToScene(QPointF(summary.width()-12, summary.height()/2)).toPoint()
+  QTest.mouseMove(window, point); QTest.qWait(350)
+  return point
+ notification=evaluate(view, 'notificationSlot')
+ move_badge()
+ assert not view.property('mediaHoverExpanded'), 'selector badge must not open a collapsed player'
+ QTest.mouseClick(window, Qt.LeftButton, pos=move_badge()); QTest.qWait(350)
+ assert evaluate(view, 'header.selectorOpen'), 'badge click must open player selector'
+ assert not view.property('mediaHoverExpanded'), 'selector menu must not open a collapsed player'
+ QTest.mouseClick(window, Qt.LeftButton, pos=move_badge()); QTest.qWait(350)
+ move(notification)
+ assert not view.property('mediaHoverExpanded'), 'notification hover must not expand media'
+ assert evaluate(view, 'notifications.hovered'), 'notification hover must enlarge notification'
+ move(summary)
+ assert view.property('mediaHoverExpanded'), 'player hover must expand media'
+ assert evaluate(view, 'notifications.hovered'), 'player hover must also enlarge notification'
+ move_badge()
+ assert view.property('mediaHoverExpanded'), 'selector badge must keep an expanded player open'
+ QTest.mouseClick(window, Qt.LeftButton, pos=move_badge()); QTest.qWait(350)
+ move(header.childItems()[0])
+ assert view.property('mediaHoverExpanded'), 'selector menu must keep an already expanded player open'
+ QTest.mouseClick(window, Qt.LeftButton, pos=move_badge()); QTest.qWait(350)
+ move(evaluate(view, 'expandedMedia'))
+ assert view.property('mediaHoverExpanded'), 'expanded player controls must keep media open'
+ move(header.childItems()[0])
+ assert not view.property('mediaHoverExpanded'), 'user area must not keep media expanded'
+ assert not evaluate(view, 'notifications.hovered'), 'user area must not enlarge notification'
+ evaluate(view, 'MprisController.activePlayer = null')
+ move(summary)
+ assert not evaluate(view, 'notifications.hovered'), 'idle text without a player must not enlarge notifications'
+ evaluate(view, 'MprisController.activePlayer = ({trackTitle: "Song", identity: "Player"})')
+ evaluate(view, 'Notifications.popupList = []')
+ move(summary)
+ assert view.property('mediaHoverExpanded'), 'player must expand without notifications'
+ window.close()
+ print('Island pointer routing: notification, player, controls, user area and no notifications passed')

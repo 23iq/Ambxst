@@ -16,17 +16,17 @@ Item {
     readonly property var activePlayer: MprisController.activePlayer
     readonly property bool hasActiveNotifications: Notifications.popupList.length > 0
     readonly property bool isBottom: Config.notchPosition === "bottom"
-    readonly property bool expandedState: !interactionSuspended && (contentHover.hovered || notchHovered || notifications.navigating || header.selectorOpen || Visibilities.playerMenuOpen)
+    readonly property bool mediaHovered: !interactionSuspended && (header.mediaHovered || mediaHover.hovered || (mediaHoverExpanded && (header.selectorOpen || Visibilities.playerMenuOpen)))
+    readonly property bool expandedState: !interactionSuspended && (mediaHovered || notificationHover.hovered || notifications.navigating)
     readonly property bool mediaHoverExpanded: hoverExpansion.expanded
 
     implicitWidth: Math.max(header.contentWidth, mediaHoverExpanded ? Config.notch.expandedMediaWidth : 0, hasActiveNotifications ? (expandedState ? 452 : 352) : 0)
     readonly property int mediaMotionDuration: Math.min(Config.animDuration, Math.max(0, Config.notch.mediaAnimationDuration))
     implicitHeight: header.implicitHeight + (mediaHoverExpanded ? expandedMedia.implicitHeight : 0) + notificationSlot.height
 
-    HoverHandler { id: contentHover }
     HoverExpansion {
         id: hoverExpansion
-        hovered: root.expandedState
+        hovered: root.mediaHovered
         available: !!root.activePlayer
         suspended: root.interactionSuspended
     }
@@ -63,6 +63,7 @@ Item {
             width: parent.width
             height: root.mediaHoverExpanded || mediaCloseTimer.running ? Math.max(0, Math.min(expandedMedia.implicitHeight, root.height - header.implicitHeight - notificationSlot.height)) : 0
             clip: true
+            HoverHandler { id: mediaHover; enabled: root.mediaHoverExpanded }
             ExpandedMedia {
                 id: expandedMedia
                 width: parent.width
@@ -78,6 +79,7 @@ Item {
             width: parent.width
             height: root.hasActiveNotifications ? notifications.implicitHeight : 0
             clip: true
+            HoverHandler { id: notificationHover; enabled: root.hasActiveNotifications }
             IslandNotifications {
                 id: notifications
                 anchors.fill: parent

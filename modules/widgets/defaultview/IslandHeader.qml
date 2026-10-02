@@ -10,6 +10,8 @@ Item {
     property bool hovered: false
     property bool mediaExpanded: false
     readonly property bool selectorOpen: summaryLoader.item?.selectorOpen ?? false
+    readonly property bool selectorHovered: summaryLoader.item?.selectorHovered ?? false
+    readonly property bool mediaHovered: !!root.player && summaryHover.hovered && (!selectorHovered || mediaExpanded)
     readonly property real microphoneWidth: MicrophoneStatus.available && MicrophoneStatus.muted ? Styling.fontSize(4) : 0
     readonly property int motionDuration: Math.min(Config.animDuration, Math.max(0, Config.notch.mediaAnimationDuration))
     readonly property real contentWidth: 200 + userInfo.width + separator1.width + separator2.width + notifIndicator.width + microphoneWidth + 36
@@ -73,6 +75,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         height: 32
         sourceComponent: !root.player || Config.notch.disableHoverExpansion ? legacySummary : simpleSummary
+        HoverHandler { id: summaryHover }
     }
     Component {
         id: simpleSummary
@@ -80,6 +83,6 @@ Item {
     }
     Component {
         id: legacySummary
-        CompactPlayer { player: root.player; notchHovered: root.hovered }
+        CompactPlayer { player: root.player; notchHovered: root.mediaHovered || root.selectorOpen }
     }
 }

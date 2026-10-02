@@ -21,6 +21,7 @@ Singleton {
         // Capturar valores inmediatamente para evitar binding issues
         property string appIcon: ""
         property string appName: ""
+        property string desktopEntry: ""
         property string body: ""
         property string image: ""
         property string summary: ""
@@ -43,6 +44,7 @@ Singleton {
             if (notification) {
                 appIcon = notification.appIcon ?? "";
                 appName = notification.appName ?? "";
+                desktopEntry = notification.desktopEntry ?? "";
                 body = notification.body ?? "";
                 image = notification.image ?? "";
                 summary = notification.summary ?? "";
@@ -85,6 +87,7 @@ Singleton {
             "actions": notif.actions,
             "appIcon": notif.appIcon,
             "appName": notif.appName,
+            "desktopEntry": notif.desktopEntry,
             "body": notif.body,
             "image": notif.image,
             "summary": notif.summary,
@@ -171,6 +174,7 @@ Singleton {
             "appIcon": json.cachedAppIcon || json.appIcon  // Usar cached si disponible
             ,
             "appName": json.appName,
+            "desktopEntry": json.desktopEntry || "",
             "body": json.body,
             "image": json.cachedImage || json.image  // Usar cached si disponible
             ,
@@ -470,26 +474,56 @@ Singleton {
     }
 
     function attemptInvokeAction(id, notifIdentifier, autoDiscard = true) {
-        const notifIndex = root.list.findIndex(notif => notif.id === id);
-        if (notifIndex !== -1) {
-            const localHandlers = root.list[notifIndex].localActionHandlers || {};
-            const localHandler = localHandlers[notifIdentifier];
-            if (typeof localHandler === "function") {
-                localHandler(id);
+        let invoked = false;
+        const notif = root.list.find(notif => notif.id === id);
+        const localHandler = notif?.localActionHandlers?.[notifIdentifier];
+        if (typeof localHandler === "function") {
+            localHandler(id);
+            invoked = true;
+        } else if (!notif?.isCached) {
+            const live = notifServer.trackedNotifications.values.find(notif => notif.id + root.idOffset === id);
+            const action = live?.actions.find(action => action.identifier === notifIdentifier);
+            if (action) {
+                action.invoke();
+                invoked = true;
+            }
+        }
+        if (invoked && autoDiscard) root.discardNotification(id);
+        return invoked;
+    }
+
+    function activateNotification(id) {
+        const notif = root.list.find(notif => notif.id === id);
+        if (!notif) return false;
+
+        // Let the sender handle navigation to the conversation or item. Never
+        // select an arbitrary first action: it may delete, reply or dismiss.
+        if (!notif.isCached) {
+            for (const identifier of ["default", "open", "view"]) {
+                if (root.attemptInvokeAction(id, identifier)) return true;
             }
         }
 
-        const notifServerIndex = notifServer.trackedNotifications.values.findIndex(notif => notif.id + root.idOffset === id);
-        if (notifServerIndex !== -1) {
-            const notifServerNotif = notifServer.trackedNotifications.values[notifServerIndex];
-            const action = notifServerNotif.actions.find(action => action.identifier === notifIdentifier);
-            if (action) {
-                action.invoke();
-            }
+        // History and senders without an opening action can still open the app.
+        const normalize = value => String(value || "").replace(/\.desktop$/i, "").toLowerCase();
+        const desktopId = normalize(notif.desktopEntry);
+        const appName = normalize(notif.appName);
+        const entries = DesktopEntries.applications.values;
+        const entry = (desktopId ? DesktopEntries.byId(notif.desktopEntry.replace(/\.desktop$/i, "")) : null)
+            || entries.find(entry => (desktopId && normalize(entry.id) === desktopId)
+                || (appName && normalize(entry.name) === appName));
+        const identities = [desktopId, appName, normalize(entry?.id), normalize(entry?.startupClass)].filter(value => value);
+        const client = AxctlService.clients.values.filter(client => identities.includes(normalize(client.class)))
+            .sort((a, b) => (a.focusHistoryID ?? 999999) - (b.focusHistoryID ?? 999999))[0];
+        if (client) {
+            AxctlService.dispatch(`focuswindow address:${client.address}`);
+        } else if (entry) {
+            entry.execute();
+        } else {
+            return false;
         }
-        if (autoDiscard) {
-            root.discardNotification(id);
-        }
+        root.discardNotification(id);
+        return true;
     }
 
     function pauseGroupTimers(appName) {
