@@ -60,6 +60,8 @@ Singleton {
     Connections {
         target: Hyprland
         function onRawEvent(event) {
+            if (event.name === "fullscreen" || event.name === "configreloaded")
+                Hyprland.refreshToplevels();
             if (["activespecial", "activespecialv2", "monitoradded", "monitoraddedv2",
                  "monitorremoved", "configreloaded"].includes(event.name))
                 specialRefreshTimer.restart();
@@ -94,6 +96,18 @@ Singleton {
         if (!mon || !mon.activeWorkspace)
             return false;
         const wsId = mon.activeWorkspace.id;
+        // axctl reports maximized Hyprland windows as fullscreen too. Read
+        // the native mode so maximizing keeps the shell visible.
+        if (AxctlService.compositorName === "hyprland") {
+            const toplevels = Hyprland.toplevels.values;
+            for (let i = 0; i < toplevels.length; i++) {
+                const win = toplevels[i].lastIpcObject;
+                if (win && win.monitor === mon.id && win.workspace
+                        && win.workspace.id === wsId && (win.fullscreen & 2) !== 0)
+                    return true;
+            }
+            return false;
+        }
         const wins = root.windowList;
         for (let i = 0; i < wins.length; i++) {
             if (wins[i].monitor === mon.id && wins[i].fullscreen && wins[i].workspace.id === wsId)
