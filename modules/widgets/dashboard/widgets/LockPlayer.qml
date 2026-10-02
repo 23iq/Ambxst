@@ -5,6 +5,7 @@ import Quickshell.Widgets
 import Quickshell.Services.Mpris
 import qs.modules.theme
 import qs.modules.components
+import qs.modules.globals
 import qs.modules.services
 import qs.config
 
