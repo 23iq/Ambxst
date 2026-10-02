@@ -87,18 +87,20 @@ Item {
     // Track if mouse is over any notch-related area
     readonly property bool isMouseOverNotch: notchMouseAreaHover.hovered || notchRegionHover.hovered
 
+    readonly property bool microphoneNotice: MicrophoneStatus.noticeVisible && MicrophoneStatus.noticeScreen === screen.name
+
     // Reveal logic:
     readonly property bool reveal: {
-        // If keepHidden is true, ONLY show on interaction
-        // UNLESS notch and bar are on same side (e.g. both top), then keepHidden is IGNORED for sync consistency
-        if (((Config.notch && Config.notch.keepHidden !== undefined) ? Config.notch.keepHidden : false) && barPosition !== notchPosition) {
-            return (screenNotchOpen || hasActiveNotifications || hoverActive || barHoverActive);
-        }
-
         // If fullscreen and bar is NOT available on fullscreen, hard-hide the notch too
         // This prevents barHoverActive from leaking through when the bar itself is hidden
         if (activeWindowFullscreen && !(Config.bar && Config.bar.availableOnFullscreen !== undefined ? Config.bar.availableOnFullscreen : false)) {
             return false;
+        }
+
+        // If keepHidden is true, ONLY show on interaction
+        // UNLESS notch and bar are on same side (e.g. both top), then keepHidden is IGNORED for sync consistency
+        if (((Config.notch && Config.notch.keepHidden !== undefined) ? Config.notch.keepHidden : false) && barPosition !== notchPosition) {
+            return (screenNotchOpen || hasActiveNotifications || microphoneNotice || hoverActive || barHoverActive);
         }
 
         // If not auto-hiding (pinned and not fullscreen), always show
@@ -106,7 +108,7 @@ Item {
         
         // Show on interaction (hover, open, notifications)
         // This works even in fullscreen, ensuring hover always works
-        if (screenNotchOpen || hasActiveNotifications || hoverActive || barHoverActive) {
+        if (screenNotchOpen || hasActiveNotifications || microphoneNotice || hoverActive || barHoverActive) {
             return true;
         }
         
@@ -143,7 +145,7 @@ Item {
     // Default view component - user@host text
     Component {
         id: defaultViewComponent
-        DefaultView {}
+        DefaultView { screenName: root.screen.name }
     }
 
     // Persistent views to avoid creation lag when opening the notch
@@ -410,7 +412,7 @@ Item {
                 persistentLauncherViewLoader.active = true;
                 Qt.callLater(() => {
                     if (persistentLauncherViewLoader.item) {
-                        notchContainer.stackView.push(persistentLauncherViewLoader.item);
+                        notchContainer.pushView(persistentLauncherViewLoader.item);
                         Qt.callLater(() => {
                             if (notchContainer.stackView.currentItem) {
                                 notchContainer.stackView.currentItem.forceActiveFocus();
@@ -432,7 +434,7 @@ Item {
                 persistentDashboardViewLoader.active = true;
                 Qt.callLater(() => {
                     if (persistentDashboardViewLoader.item) {
-                        notchContainer.stackView.push(persistentDashboardViewLoader.item);
+                        notchContainer.pushView(persistentDashboardViewLoader.item);
                         Qt.callLater(() => {
                             if (notchContainer.stackView.currentItem) {
                                 notchContainer.stackView.currentItem.forceActiveFocus();
@@ -454,7 +456,7 @@ Item {
                 persistentPowerMenuViewLoader.active = true;
                 Qt.callLater(() => {
                     if (persistentPowerMenuViewLoader.item) {
-                        notchContainer.stackView.push(persistentPowerMenuViewLoader.item);
+                        notchContainer.pushView(persistentPowerMenuViewLoader.item);
                         Qt.callLater(() => {
                             if (notchContainer.stackView.currentItem) {
                                 notchContainer.stackView.currentItem.forceActiveFocus();
@@ -476,7 +478,7 @@ Item {
                 persistentToolsMenuViewLoader.active = true;
                 Qt.callLater(() => {
                     if (persistentToolsMenuViewLoader.item) {
-                        notchContainer.stackView.push(persistentToolsMenuViewLoader.item);
+                        notchContainer.pushView(persistentToolsMenuViewLoader.item);
                         Qt.callLater(() => {
                             if (notchContainer.stackView.currentItem) {
                                 notchContainer.stackView.currentItem.forceActiveFocus();

@@ -8,6 +8,7 @@ import qs.modules.theme
 import qs.modules.services
 import qs.modules.globals
 import qs.config
+import "MicrophoneVolume.js" as MicrophoneVolume
 
 PanelWindow {
     id: root
@@ -33,6 +34,16 @@ PanelWindow {
     // Internal state for responsiveness
     property real osdValue: 0
     property bool osdMuted: false
+    readonly property bool microphoneAvailable: !!Audio.source?.ready && !!Audio.source?.audio
+    property var microphoneVolumeBaseline: null
+
+    function resetMicrophoneVolumeBaseline() {
+        microphoneVolumeBaseline = MicrophoneVolume.observe(null, Audio.source,
+            Audio.source?.audio?.volume, microphoneAvailable);
+    }
+
+    Component.onCompleted: resetMicrophoneVolumeBaseline()
+    onMicrophoneAvailableChanged: resetMicrophoneVolumeBaseline()
 
     // Centering wrapper
     Item {
@@ -175,6 +186,9 @@ PanelWindow {
     // Services connections - Direct and responsive
     Connections {
         target: Audio
+        function onSourceChanged() {
+            root.resetMicrophoneVolumeBaseline();
+        }
         function onVolumeChanged(volume, muted, node) {
             root.osdValue = volume;
             root.osdMuted = muted;
@@ -183,6 +197,10 @@ PanelWindow {
             hideTimer.restart();
         }
         function onMicVolumeChanged(volume, muted, node) {
+            if (node !== Audio.source) return;
+            root.microphoneVolumeBaseline = MicrophoneVolume.observe(root.microphoneVolumeBaseline,
+                node, volume, root.microphoneAvailable);
+            if (!root.microphoneVolumeBaseline.show) return;
             root.osdValue = volume;
             root.osdMuted = muted;
             GlobalStates.osdIndicator = "mic";

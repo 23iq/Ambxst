@@ -1,4 +1,8 @@
 {
+  "island.previous": "Previous track",
+  "island.next": "Next track",
+  "island.play_pause": "Play / pause",
+
   "_meta.direction": "ltr",
   "ai.api_key_missing": "API Key missing for %1. Add it in Settings or set %2.",
   "ai.approve": "Approve",

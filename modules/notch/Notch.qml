@@ -45,8 +45,39 @@ Item {
     readonly property bool screenNotchOpen: visibilities ? (visibilities.launcher || visibilities.dashboard || visibilities.powermenu || visibilities.tools) : false
     readonly property bool hasActiveNotifications: Notifications.popupList.length > 0
 
-    property int defaultHeight: Config.showBackground ? (screenNotchOpen || hasActiveNotifications ? Math.max(stackContainer.height, 44) : 44) : (screenNotchOpen || hasActiveNotifications ? Math.max(stackContainer.height, 40) : 40)
-    property int islandHeight: screenNotchOpen || hasActiveNotifications ? Math.max(stackContainer.height, 36) : 36
+    // Navigation, rather than visibility signals, owns layout: visibility may
+    // change before StackView has selected its incoming item.
+    readonly property real contentPadding: isExpanded ? 16 : 0
+    readonly property real targetContentWidth: (stackViewInternal.currentItem ? stackViewInternal.currentItem.implicitWidth : 0) + contentPadding * 2
+    readonly property real targetContentHeight: (stackViewInternal.currentItem ? stackViewInternal.currentItem.implicitHeight : 0) + contentPadding * 2
+    property real defaultHeight: Math.max(targetContentHeight, Config.showBackground ? 44 : 40)
+    property real islandHeight: Math.max(targetContentHeight, 36)
+
+    function pushView(view) {
+        // StackView records whether the item has an explicit size on load.
+        // Prepare persistent views before push so it never takes over sizing.
+        prepareView(view);
+        return stackViewInternal.push(view);
+    }
+
+    function prepareView(view) {
+        if (!view)
+            return;
+
+        const expanded = view !== stackViewInternal.get(0);
+        const inset = expanded ? 16 : 0;
+        // Expanded menus retain their natural size while fading out. The
+        // default view follows the animated viewport so its media closes with
+        // the silhouette; its implicit dimensions remain the geometry target.
+        view.width = Qt.binding(() => expanded ? view.implicitWidth : stackViewInternal.width);
+        view.height = Qt.binding(() => expanded ? view.implicitHeight : stackViewInternal.height);
+        view.x = Qt.binding(() => (stackViewInternal.width - view.width) / 2);
+        // Preserve the screen-edge origin while the background changes height.
+        view.y = Qt.binding(() => notchContainer.position === "top" ? inset : stackViewInternal.height - view.height - inset);
+        if (!expanded && view.hasOwnProperty("interactionSuspended")) {
+            view.interactionSuspended = Qt.binding(() => screenNotchOpen || stackViewInternal.busy || notchContainer.isExpanded);
+        }
+    }
 
     readonly property string position: Config.notchPosition ?? "top"
 
@@ -54,23 +85,25 @@ Item {
     readonly property int cornerSize: Config.roundness > 0 ? Config.roundness + 4 : 0
     readonly property int totalCornerWidth: Config.notchTheme === "default" ? cornerSize * 2 : 0
 
-    implicitWidth: screenNotchOpen ? Math.max(stackContainer.width + totalCornerWidth, 290) : stackContainer.width + totalCornerWidth
+    implicitWidth: isExpanded ? Math.max(targetContentWidth + totalCornerWidth, 290) : targetContentWidth + totalCornerWidth
     implicitHeight: Config.notchTheme === "default" ? defaultHeight : (Config.notchTheme === "island" ? islandHeight : defaultHeight)
 
+    readonly property int geometryAnimationDuration: isExpanded || screenNotchOpen || stackViewInternal.busy ? Config.animDuration : Math.min(Config.animDuration, Math.max(0, Config.notch.mediaAnimationDuration))
+
     Behavior on implicitWidth {
-        enabled: (screenNotchOpen || stackViewInternal.busy) && Config.animDuration > 0
+        enabled: Config.animDuration > 0
         NumberAnimation {
-            duration: Config.animDuration
-            easing.type: isExpanded ? Easing.OutBack : Easing.OutQuart
+            duration: notchContainer.geometryAnimationDuration
+            easing.type: isExpanded ? Easing.OutBack : stackViewInternal.busy ? Easing.InOutCubic : Easing.OutCubic
             easing.overshoot: isExpanded ? 1.2 : 1.0
         }
     }
 
     Behavior on implicitHeight {
-        enabled: (screenNotchOpen || stackViewInternal.busy) && Config.animDuration > 0
+        enabled: Config.animDuration > 0
         NumberAnimation {
-            duration: Config.animDuration
-            easing.type: isExpanded ? Easing.OutBack : Easing.OutQuart
+            duration: notchContainer.geometryAnimationDuration
+            easing.type: isExpanded ? Easing.OutBack : stackViewInternal.busy ? Easing.InOutCubic : Easing.OutCubic
             easing.overshoot: isExpanded ? 1.2 : 1.0
         }
     }
@@ -297,8 +330,9 @@ Item {
         Item {
             id: stackContainer
             anchors.centerIn: parent
-            width: stackViewInternal.currentItem ? stackViewInternal.currentItem.implicitWidth + (screenNotchOpen ? 32 : 0) : (screenNotchOpen ? 32 : 0)
-            height: stackViewInternal.currentItem ? stackViewInternal.currentItem.implicitHeight + (screenNotchOpen ? 32 : 0) : (screenNotchOpen ? 32 : 0)
+            // Clip to the animated silhouette without resizing the views inside.
+            width: parent.width
+            height: parent.height
             clip: true
 
             // Propiedad para controlar el blur durante las transiciones
@@ -326,14 +360,15 @@ Item {
             StackView {
                 id: stackViewInternal
                 anchors.fill: parent
-                anchors.margins: screenNotchOpen ? 16 : 0
                 initialItem: defaultViewComponent
 
                 onCurrentItemChanged: {
+                    notchContainer.prepareView(currentItem);
                     notchContainer.updateChildHover();
                 }
 
                 Component.onCompleted: {
+                    notchContainer.prepareView(currentItem);
                     isShowingDefault = true;
                     isShowingNotifications = false;
                 }
@@ -346,109 +381,12 @@ Item {
                     }
                 }
 
-                pushEnter: Transition {
-                    PropertyAnimation {
-                        property: "opacity"
-                        from: 0
-                        to: 1
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                    PropertyAnimation {
-                        property: "scale"
-                        from: 0.8
-                        to: 1
-                        duration: Config.animDuration
-                        easing.type: Easing.OutBack
-                        easing.overshoot: 1.2
-                    }
-                }
-
-                pushExit: Transition {
-                    PropertyAnimation {
-                        property: "opacity"
-                        from: 1
-                        to: 0
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                    PropertyAnimation {
-                        property: "scale"
-                        from: 1
-                        to: 1.05
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                }
-
-                popEnter: Transition {
-                    PropertyAnimation {
-                        property: "opacity"
-                        from: 0
-                        to: 1
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                    PropertyAnimation {
-                        property: "scale"
-                        from: 1.05
-                        to: 1
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                }
-
-                popExit: Transition {
-                    PropertyAnimation {
-                        property: "opacity"
-                        from: 1
-                        to: 0
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                    PropertyAnimation {
-                        property: "scale"
-                        from: 1
-                        to: 0.95
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                }
-
-                replaceEnter: Transition {
-                    PropertyAnimation {
-                        property: "opacity"
-                        from: 0
-                        to: 1
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                    PropertyAnimation {
-                        property: "scale"
-                        from: 0.8
-                        to: 1
-                        duration: Config.animDuration
-                        easing.type: Easing.OutBack
-                        easing.overshoot: 1.2
-                    }
-                }
-
-                replaceExit: Transition {
-                    PropertyAnimation {
-                        property: "opacity"
-                        from: 1
-                        to: 0
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                    PropertyAnimation {
-                        property: "scale"
-                        from: 1
-                        to: 1.05
-                        duration: Config.animDuration
-                        easing.type: Easing.OutQuart
-                    }
-                }
+                pushEnter: NotchViewTransition { entering: true }
+                pushExit: NotchViewTransition { entering: false }
+                popEnter: NotchViewTransition { entering: true }
+                popExit: NotchViewTransition { entering: false }
+                replaceEnter: NotchViewTransition { entering: true }
+                replaceExit: NotchViewTransition { entering: false }
             }
         }
     }

@@ -682,6 +682,12 @@ Singleton {
             property string noMediaDisplay: "userHost"
             property string customText: "Ambxst"
             property bool disableHoverExpansion: true
+            property int hoverExpandDelay: 90
+            property int hoverCollapseDelay: 200
+            property int expandedMediaWidth: 440
+            property int mediaAnimationDuration: 160
+            property int expandedArtworkSize: 64
+            property int microphoneNoticeDuration: 1800
         }
     }
 

@@ -1,4 +1,8 @@
 {
+  "island.previous": "Предыдущий трек",
+  "island.next": "Следующий трек",
+  "island.play_pause": "Воспроизведение / пауза",
+
   "_meta.direction": "ltr",
   "ai.api_key_missing": "API-ключ отсутствует для %1. Добавьте его в настройках или задайте %2.",
   "ai.approve": "Одобрить",

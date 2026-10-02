@@ -7,5 +7,11 @@ var data = {
     "keepHidden": false,
     "noMediaDisplay": "userHost",
     "customText": "Ambxst",
-    "disableHoverExpansion": true
+    "disableHoverExpansion": true,
+    "hoverExpandDelay": 90,
+    "hoverCollapseDelay": 200,
+    "expandedMediaWidth": 440,
+    "mediaAnimationDuration": 160,
+    "expandedArtworkSize": 64,
+    "microphoneNoticeDuration": 1800
 }
